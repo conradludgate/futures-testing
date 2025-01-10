@@ -54,6 +54,8 @@ use alloc::{sync::Arc, task::Wake};
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::{arbtest, ArbTest};
 
+pub use arbitrary;
+
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
 pub trait TestCase<'b> {
     /// The [`Future`] that is being tested for correctness
@@ -193,11 +195,8 @@ enum Choice<A> {
     Poll,
 }
 
-#[automatically_derived]
-impl<'arbitrary, A: arbitrary::Arbitrary<'arbitrary>> arbitrary::Arbitrary<'arbitrary>
-    for Choice<A>
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'arbitrary>) -> arbitrary::Result<Self> {
+impl<'a, A: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Choice<A> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match <u8 as arbitrary::Arbitrary>::arbitrary(u)? % 2 {
             0 => Ok(Choice::Drive(arbitrary::Arbitrary::arbitrary(u)?)),
             1 => Ok(Choice::Poll),
@@ -205,7 +204,7 @@ impl<'arbitrary, A: arbitrary::Arbitrary<'arbitrary>> arbitrary::Arbitrary<'arbi
         }
     }
 
-    fn arbitrary_take_rest(mut u: arbitrary::Unstructured<'arbitrary>) -> arbitrary::Result<Self> {
+    fn arbitrary_take_rest(mut u: arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match <u8 as arbitrary::Arbitrary>::arbitrary(&mut u)? % 2 {
             0 => Ok(Choice::Drive(arbitrary::Arbitrary::arbitrary_take_rest(u)?)),
             1 => Ok(Choice::Poll),
@@ -222,15 +221,25 @@ impl<'arbitrary, A: arbitrary::Arbitrary<'arbitrary>> arbitrary::Arbitrary<'arbi
         depth: usize,
     ) -> Result<(usize, Option<usize>), arbitrary::MaxRecursionReached> {
         Ok(arbitrary::size_hint::and(
-            <u8 as arbitrary::Arbitrary>::try_size_hint(depth)?,
+            (1, Some(1)),
             arbitrary::size_hint::try_recursion_guard(depth, |depth| {
-                Ok(arbitrary::size_hint::or_all(&[
-                    Ok(arbitrary::size_hint::and_all(&[
-                        <A as arbitrary::Arbitrary>::try_size_hint(depth)?,
-                    ]))?,
-                    Ok(arbitrary::size_hint::and_all(&[]))?,
-                ]))
+                <A as arbitrary::Arbitrary>::try_size_hint(depth)
             })?,
         ))
+    }
+}
+
+/// A useful [`Arbitrary`] wrapper for if you just need the [default][`Default`] constructor
+/// for some [`TestCase`] arguments.
+pub struct ArbitraryDefault<T>(pub T);
+
+impl<'a, A: Default> arbitrary::Arbitrary<'a> for ArbitraryDefault<A> {
+    fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(A::default()))
+    }
+
+    #[inline]
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (0, Some(0))
     }
 }

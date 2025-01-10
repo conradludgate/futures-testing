@@ -12,16 +12,22 @@ use alloc::{sync::Arc, task::Wake};
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::{arbtest, ArbTest};
 
-pub trait TestCase {
-    type Future: Future;
-    type Driver: Driver;
-    type Args: for<'a> Arbitrary<'a>;
+pub trait TestCase<'b> {
+    type Future<'a>: Future
+    where
+        Self: 'a;
 
-    fn init(&self, args: Self::Args) -> (Self::Driver, Self::Future);
+    type Driver<'a>: Driver<'b>
+    where
+        Self: 'a;
+
+    type Args: Arbitrary<'b>;
+
+    fn init(&self, args: Self::Args) -> (Self::Driver<'_>, Self::Future<'_>);
 }
 
-pub trait Driver {
-    type Args: for<'a> Arbitrary<'a>;
+pub trait Driver<'b> {
+    type Args: Arbitrary<'b>;
 
     fn poll(&mut self, args: Self::Args);
 }
@@ -40,13 +46,17 @@ impl Wake for TestWaker {
     }
 }
 
-pub fn tests<T: TestCase>(
-    t: T,
-) -> ArbTest<impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>> {
+pub fn tests<T>(t: T) -> ArbTest<impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>>
+where
+    T: for<'b> TestCase<'b>,
+{
     arbtest(move |u| test(&t, u))
 }
 
-fn test<T: TestCase>(t: &T, u: &mut Unstructured) -> arbitrary::Result<()> {
+fn test<'b, T>(t: &T, u: &mut Unstructured<'b>) -> arbitrary::Result<()>
+where
+    T: TestCase<'b>,
+{
     let (mut driver, future) = t.init(u.arbitrary()?);
     let mut future = pin!(future);
 

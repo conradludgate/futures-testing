@@ -57,14 +57,10 @@ use arbtest::{arbtest, ArbTest};
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
 pub trait TestCase<'b> {
     /// The [`Future`] that is being tested for correctness
-    type Future<'a>: Future
-    where
-        Self: 'a;
+    type Future<'a>: Future;
 
     /// The [`Driver`] that is responsible for storing the [`Waker`] and making progress to the [`TestCase::Future`]
-    type Driver<'a>: Driver<'b>
-    where
-        Self: 'a;
+    type Driver<'a>: Driver<'b>;
 
     /// The args that are used to seed the current test.
     type Args: Arbitrary<'b>;

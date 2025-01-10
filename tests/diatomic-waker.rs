@@ -1,18 +1,28 @@
 use std::{future::Future, pin::Pin};
 
+use arbitrary::{Arbitrary, Unstructured};
+use diatomic_waker::DiatomicWaker;
 use futures_testing::{Driver, TestCase};
 
-struct DiatomicWakerTestCase(diatomic_waker::DiatomicWaker);
+struct DiatomicWakerTestCase;
+
+struct Args(DiatomicWaker);
+
+impl<'a> Arbitrary<'a> for Args {
+    fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Args(DiatomicWaker::new()))
+    }
+}
 
 impl TestCase<'_> for DiatomicWakerTestCase {
     type Future<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
     type Driver<'a> = Source<'a>;
 
-    type Args = ();
+    type Args = Args;
 
-    fn init(&mut self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
-        let mut sink = self.0.sink_ref();
+    fn init<'a>(&self, args: &'a mut Args) -> (Self::Driver<'a>, Self::Future<'a>) {
+        let mut sink = args.0.sink_ref();
         let source = sink.source_ref();
 
         let sink = Box::pin(async move {
@@ -44,5 +54,5 @@ impl Driver<'_> for Source<'_> {
 
 #[test]
 fn oneshot() {
-    futures_testing::tests(DiatomicWakerTestCase(diatomic_waker::DiatomicWaker::new())).run();
+    futures_testing::tests(DiatomicWakerTestCase).run();
 }

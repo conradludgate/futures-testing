@@ -18,7 +18,7 @@
 //!     type Driver<'a> = OneShotSender;
 //!
 //!     type Args = ();
-//!     fn init(&mut self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
+//!     fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, Self::Future<'a>) {
 //!         let (tx, rx) = tokio::sync::oneshot::channel();
 //!         (OneShotSender(Some(tx)), rx)
 //!     }
@@ -74,11 +74,8 @@ pub trait TestCase<'b> {
     /// # Implementation notes
     ///
     /// This function should be deterministic. Any randomness should be derived from the [`TestCase::Args`] or from
-    /// [`Driver::Args`].
-    ///
-    /// The function takes a `&mut Self` to allow for some specific test patterns, and not to store state that changes
-    /// from test to test.
-    fn init(&mut self, args: Self::Args) -> (Self::Driver<'_>, Self::Future<'_>);
+    /// [`Driver::Args`]. You should not use interior mutability inside of `self`.
+    fn init<'a>(&self, args: &'a mut Self::Args) -> (Self::Driver<'a>, Self::Future<'a>);
 }
 
 /// A `Driver` is responsible for making a leaf future make progress.
@@ -127,7 +124,7 @@ impl Wake for TestWaker {
 ///     type Driver<'a> = OneShotSender;
 ///
 ///     type Args = ();
-///     fn init(&mut self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
+///     fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, Self::Future<'a>) {
 ///         let (tx, rx) = tokio::sync::oneshot::channel();
 ///         (OneShotSender(Some(tx)), rx)
 ///     }
@@ -159,7 +156,8 @@ fn test<'b, T>(t: &mut T, u: &mut Unstructured<'b>) -> arbitrary::Result<()>
 where
     T: TestCase<'b>,
 {
-    let (mut driver, future) = t.init(u.arbitrary()?);
+    let mut args = u.arbitrary()?;
+    let (mut driver, future) = t.init(&mut args);
     let mut future = pin!(future);
 
     for choice in u.arbitrary_iter::<Choice<_>>()? {

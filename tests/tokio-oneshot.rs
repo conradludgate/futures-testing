@@ -9,7 +9,7 @@ impl TestCase<'_> for OneShotTestCase {
 
     type Args = ();
 
-    fn init(&self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
+    fn init(&mut self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (OneShotSender(Some(tx)), rx)
     }

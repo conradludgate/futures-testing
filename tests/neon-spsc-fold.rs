@@ -14,7 +14,7 @@ impl TestCase<'_> for SpscFoldRecvTestCase {
 
     type Args = ();
 
-    fn init(&self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
+    fn init(&mut self, _args: ()) -> (Self::Driver<'_>, Self::Future<'_>) {
         let (mut sender, mut receiver) = channel();
         let (tx, mut rx) = mpsc::unbounded_channel::<u8>();
         let sender = Box::pin(async move {
@@ -66,7 +66,7 @@ impl TestCase<'_> for SpscFoldSendTestCase {
 
     type Args = Vec<u8>;
 
-    fn init(&self, args: Vec<u8>) -> (Self::Driver<'_>, Self::Future<'_>) {
+    fn init(&mut self, args: Vec<u8>) -> (Self::Driver<'_>, Self::Future<'_>) {
         let (mut sender, mut receiver) = channel();
         let sender = Box::pin(async move {
             for t in args {

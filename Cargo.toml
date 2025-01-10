@@ -1,0 +1,11 @@
+[package]
+name = "futures-testing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arbitrary = "1.4.1"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync"] }

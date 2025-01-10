@@ -29,5 +29,5 @@ impl Driver for OneShotSender {
 
 #[test]
 fn oneshot() {
-    futures_testing::run_test(&OneShotTestCase);
+    futures_testing::tests(OneShotTestCase).run();
 }

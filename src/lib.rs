@@ -8,7 +8,7 @@ use std::{
 };
 
 use arbitrary::{Arbitrary, Unstructured};
-use rand::{rngs::StdRng, thread_rng, Rng, SeedableRng};
+use arbtest::{arbtest, ArbTest};
 
 pub trait TestCase {
     type Future: Future;
@@ -71,36 +71,22 @@ impl Wake for TestWaker {
 
 // impl Eq for WeakWaker {}
 
-pub fn run_test<T: TestCase>(t: &T) {
-    let seed: u64 = thread_rng().gen();
-    for i in 0..1000 {
-        run_test_single_seed(t, i ^ seed);
-    }
+pub fn tests<T: TestCase>(
+    t: T,
+) -> ArbTest<impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>> {
+    arbtest(move |u| test(&t, u))
 }
 
-pub fn run_test_single_seed<T: TestCase>(t: &T, seed: u64) {
-    let mut rng = StdRng::seed_from_u64(seed);
-    test(t, &mut rng);
-}
-
-fn test<T: TestCase>(t: &T, rng: &mut impl Rng) {
-    let mut buffer = vec![];
-
-    let Some(init_args) = get(&mut buffer, rng) else {
-        return;
-    };
-    let (mut driver, future) = t.init(init_args);
+fn test<T: TestCase>(t: &T, u: &mut Unstructured) -> arbitrary::Result<()> {
+    let (mut driver, future) = t.init(u.arbitrary()?);
     let mut future = pin!(future);
 
     let wakers = Arc::new(Wakers {
         // wakers: Mutex::new(HashSet::new()),
     });
 
-    loop {
-        let Some(poll_future) = get(&mut buffer, rng) else {
-            return;
-        };
-        if poll_future {
+    u.arbitrary_loop(None, None, |u| {
+        if u.arbitrary()? {
             let waker = wakers.new_waker();
 
             if future
@@ -108,7 +94,8 @@ fn test<T: TestCase>(t: &T, rng: &mut impl Rng) {
                 .poll(&mut Context::from_waker(&Waker::from(waker.clone())))
                 .is_ready()
             {
-                return;
+                // finished testing
+                return Ok(std::ops::ControlFlow::Break(()));
             }
 
             if Arc::strong_count(&waker) == 1 {
@@ -119,32 +106,9 @@ fn test<T: TestCase>(t: &T, rng: &mut impl Rng) {
                 }
             }
         } else {
-            let Some(args) = get(&mut buffer, rng) else {
-                return;
-            };
-            driver.poll(args);
-        }
-    }
-}
-
-fn get<A: for<'a> Arbitrary<'a>, R: Rng>(buf: &mut Vec<u8>, rng: &mut R) -> Option<A> {
-    loop {
-        let mut unstructured = Unstructured::new(buf);
-        match A::arbitrary(&mut unstructured) {
-            Err(arbitrary::Error::NotEnoughData) => {}
-            Ok(_t) if buf.is_empty() => {}
-            Ok(t) => {
-                let index = buf.len() - unstructured.len();
-                buf.splice(..index, []);
-                return Some(t);
-            }
-            // get a different seed
-            Err(arbitrary::Error::IncorrectFormat) => return None,
-            Err(_) => panic!("could not construct test case"),
+            driver.poll(u.arbitrary()?);
         }
 
-        let i = buf.len();
-        buf.resize(i * 2 + 1, 0);
-        rng.fill_bytes(&mut buf[i..]);
-    }
+        Ok(std::ops::ControlFlow::Continue(()))
+    })
 }

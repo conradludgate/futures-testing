@@ -112,6 +112,14 @@ fn check_send() {
     futures_testing::tests(SpscFoldSendTestCase).run();
 }
 
+#[test]
+#[should_panic = "Waker passed to future was lost without being woken"]
+fn check_send_stall_regression() {
+    futures_testing::tests(SpscFoldSendTestCase)
+        .seed(0x2637efb100000019)
+        .run();
+}
+
 mod spsc_fold {
     //! Taken from <https://github.com/neondatabase/neon/blob/735c66dc65f1163591a2745934f4be766072c88c/libs/utils/src/sync/spsc_fold.rs>
 

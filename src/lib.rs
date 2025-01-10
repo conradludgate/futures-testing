@@ -1,11 +1,13 @@
-use std::{
-    // collections::HashSet,
+use core::{
     future::Future,
-    hash::Hash,
     pin::pin,
-    sync::{Arc, Mutex, Weak},
-    task::{Context, Wake, Waker},
+    sync::atomic::AtomicBool,
+    task::{Context, Waker},
 };
+
+extern crate alloc;
+
+use alloc::{sync::Arc, task::Wake};
 
 use arbitrary::{Arbitrary, Unstructured};
 use arbtest::{arbtest, ArbTest};
@@ -24,25 +26,8 @@ pub trait Driver {
     fn poll(&mut self, args: Self::Args);
 }
 
-struct Wakers {
-    // wakers: Mutex<HashSet<WeakWaker>>,
-}
-
-impl Wakers {
-    fn new_waker(self: &Arc<Self>) -> Arc<TestWaker> {
-        let waker = Arc::new(TestWaker {
-            // wakers: self.clone(),
-            woken: Mutex::new(false),
-        });
-        // let weak = WeakWaker(Arc::downgrade(&waker));
-        // self.wakers.lock().unwrap().insert(weak);
-        waker
-    }
-}
-
 struct TestWaker {
-    // wakers: Arc<Wakers>,
-    woken: Mutex<bool>,
+    woken: AtomicBool,
 }
 
 impl Wake for TestWaker {
@@ -51,25 +36,9 @@ impl Wake for TestWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        *self.woken.lock().unwrap() = true;
+        self.woken.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
-
-// struct WeakWaker(Weak<TestWaker>);
-
-// impl Hash for WeakWaker {
-//     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-//         self.0.as_ptr().hash(state);
-//     }
-// }
-
-// impl PartialEq for WeakWaker {
-//     fn eq(&self, other: &Self) -> bool {
-//         Weak::ptr_eq(&self.0, &other.0)
-//     }
-// }
-
-// impl Eq for WeakWaker {}
 
 pub fn tests<T: TestCase>(
     t: T,
@@ -81,13 +50,11 @@ fn test<T: TestCase>(t: &T, u: &mut Unstructured) -> arbitrary::Result<()> {
     let (mut driver, future) = t.init(u.arbitrary()?);
     let mut future = pin!(future);
 
-    let wakers = Arc::new(Wakers {
-        // wakers: Mutex::new(HashSet::new()),
-    });
-
     u.arbitrary_loop(None, None, |u| {
         if u.arbitrary()? {
-            let waker = wakers.new_waker();
+            let mut waker = Arc::new(TestWaker {
+                woken: AtomicBool::new(false),
+            });
 
             if future
                 .as_mut()
@@ -98,9 +65,10 @@ fn test<T: TestCase>(t: &T, u: &mut Unstructured) -> arbitrary::Result<()> {
                 return Ok(std::ops::ControlFlow::Break(()));
             }
 
-            if Arc::strong_count(&waker) == 1 {
-                // if the strong count is 1, then the waker has not been saved.
-                let woken = *waker.woken.lock().unwrap();
+            // if we can get mut access to this waker, then it was not registered anywhere
+            if let Some(waker) = Arc::get_mut(&mut waker) {
+                let woken = *waker.woken.get_mut();
+                // if the waker was woken, then it's acceptable to be unregistered.
                 if !woken {
                     panic!("Waker passed to future was lost without being woken");
                 }

@@ -35,22 +35,19 @@
 //! futures_testing::tests(OneShotTestCase).run();
 //! ```
 
-use core::{
-    future::Future,
-    pin::pin,
-    sync::atomic::AtomicBool,
-    task::{Context, Waker},
-};
-use std::marker::PhantomData;
-
 extern crate alloc;
-
-use alloc::{sync::Arc, task::Wake};
-
-use arbitrary::{Arbitrary, Unstructured};
-use arbtest::{arbtest, ArbTest};
+use alloc::sync::Arc;
+use core::future::Future;
+use core::marker::PhantomData;
+use core::pin::pin;
+use core::sync::atomic::AtomicBool;
+use core::task::Context;
+use std::{pin::Pin, task::Poll};
 
 pub use arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
+use arbtest::{arbtest, ArbTest};
+use futures_util::task::waker_ref;
 
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
 pub trait TestCase<'b> {
@@ -109,13 +106,9 @@ struct TestWaker {
     woken: AtomicBool,
 }
 
-impl Wake for TestWaker {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.woken.store(true, std::sync::atomic::Ordering::SeqCst);
+impl futures_util::task::ArcWake for TestWaker {
+    fn wake_by_ref(this: &Arc<Self>) {
+        this.woken.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -169,26 +162,9 @@ where
     while !u.is_empty() {
         match u.arbitrary::<Choice<_>>()? {
             Choice::Poll => {
-                let mut waker = Arc::new(TestWaker {
-                    woken: AtomicBool::new(false),
-                });
-
-                if future
-                    .as_mut()
-                    .poll(&mut Context::from_waker(&Waker::from(waker.clone())))
-                    .is_ready()
-                {
+                if poll_fut(future.as_mut()).is_ready() {
                     // finished testing
                     return Ok(());
-                }
-
-                // if we can get mut access to this waker, then it was not registered anywhere
-                if let Some(waker) = Arc::get_mut(&mut waker) {
-                    let woken = *waker.woken.get_mut();
-                    // if the waker was woken, then it's acceptable to be unregistered.
-                    if !woken {
-                        panic!("Waker passed to future was lost without being woken");
-                    }
                 }
             }
             Choice::Drive(args) => driver.poll(args),
@@ -196,6 +172,31 @@ where
     }
 
     Err(arbitrary::Error::NotEnoughData)
+}
+
+/// poll a [`Future`] and make sure the [`std::task::Waker`] was registered correctly.
+fn poll_fut(f: Pin<&mut impl Future>) -> Poll<()> {
+    let mut waker = Arc::new(TestWaker {
+        woken: AtomicBool::new(false),
+    });
+
+    let waker_ref = waker_ref(&waker);
+    let mut cx = Context::from_waker(&waker_ref);
+    if f.poll(&mut cx).is_ready() {
+        // finished testing
+        return Poll::Ready(());
+    }
+
+    // if we can get mut access to this waker, then it was not registered anywhere
+    if let Some(waker) = Arc::get_mut(&mut waker) {
+        let woken = *waker.woken.get_mut();
+        // if the waker was woken, then it's acceptable to be unregistered.
+        if !woken {
+            panic!("Waker passed to future was lost without being woken");
+        }
+    }
+
+    Poll::Pending
 }
 
 enum Choice<A> {

@@ -1,6 +1,8 @@
-use std::{future::Future, task::Context};
+use std::future::Future;
+use std::task::Context;
 
-use futures::{task::noop_waker_ref, FutureExt};
+use futures::task::noop_waker_ref;
+use futures::FutureExt;
 use futures_testing::{drive_fn, Driver, TestCase};
 use spsc_fold::channel;
 use tokio::sync::mpsc;

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 arbitrary = "1"
 arbtest = "0.3"
+futures-util = "0.3.31"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync"] }

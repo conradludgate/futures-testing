@@ -144,6 +144,7 @@ dependencies = [
  "arbtest",
  "diatomic-waker",
  "futures",
+ "futures-util",
  "scopeguard",
  "tokio",
 ]

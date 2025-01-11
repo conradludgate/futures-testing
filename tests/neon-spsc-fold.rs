@@ -1,7 +1,7 @@
-use std::{future::Future, pin::Pin, task::Context};
+use std::{future::Future, task::Context};
 
-use futures::task::noop_waker_ref;
-use futures_testing::{Driver, TestCase};
+use futures::{task::noop_waker_ref, FutureExt};
+use futures_testing::{drive_fn, Driver, TestCase};
 use spsc_fold::channel;
 use tokio::sync::mpsc;
 
@@ -12,8 +12,9 @@ impl<'b> TestCase<'b> for SpscFoldRecvTestCase {
 
     fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
         let (mut sender, mut receiver) = channel();
+
         let (tx, mut rx) = mpsc::unbounded_channel::<u8>();
-        let sender = Box::pin(async move {
+        let mut sender = Box::pin(async move {
             while let Some(t) = rx.recv().await {
                 sender
                     .send(t, |t, u| match t.checked_add(u) {
@@ -27,24 +28,16 @@ impl<'b> TestCase<'b> for SpscFoldRecvTestCase {
                     .expect("receiver should not be gone")
             }
         });
-        let receiver = async move { receiver.recv().await.unwrap() };
 
-        (TestSender(tx, sender), receiver)
-    }
-}
+        let driver = drive_fn(move |arg: u8| {
+            tx.send(arg).unwrap();
+            let res = sender.poll_unpin(&mut Context::from_waker(noop_waker_ref()));
+            assert!(res.is_pending());
+        });
 
-struct TestSender(mpsc::UnboundedSender<u8>, Pin<Box<dyn Future<Output = ()>>>);
+        let future = async move { receiver.recv().await.unwrap() };
 
-impl Driver<'_> for TestSender {
-    type Args = u8;
-
-    fn poll(&mut self, args: u8) {
-        self.0.send(args).unwrap();
-        assert!(self
-            .1
-            .as_mut()
-            .poll(&mut Context::from_waker(noop_waker_ref()))
-            .is_pending());
+        (driver, future)
     }
 }
 
@@ -62,7 +55,8 @@ impl<'b> TestCase<'b> for SpscFoldSendTestCase {
         let args = std::mem::take(args);
 
         let (mut sender, mut receiver) = channel();
-        let sender = async move {
+
+        let future = async move {
             for t in args {
                 sender
                     .send(t, |t, u| match t.checked_add(u) {
@@ -76,27 +70,19 @@ impl<'b> TestCase<'b> for SpscFoldSendTestCase {
                     .expect("receiver should not be gone")
             }
         };
-        let receiver = Box::pin(async move {
+
+        let mut receiver = Box::pin(async move {
             loop {
                 receiver.recv().await.unwrap();
             }
         });
 
-        (TestReceiver(receiver), sender)
-    }
-}
+        let driver = drive_fn(move |()| {
+            let res = receiver.poll_unpin(&mut Context::from_waker(noop_waker_ref()));
+            assert!(res.is_pending());
+        });
 
-struct TestReceiver(Pin<Box<dyn Future<Output = ()>>>);
-
-impl Driver<'_> for TestReceiver {
-    type Args = ();
-
-    fn poll(&mut self, _args: ()) {
-        assert!(self
-            .0
-            .as_mut()
-            .poll(&mut Context::from_waker(noop_waker_ref()))
-            .is_pending());
+        (driver, future)
     }
 }
 

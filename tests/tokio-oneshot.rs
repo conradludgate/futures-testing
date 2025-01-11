@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use futures_testing::{Driver, TestCase};
+use futures_testing::{drive_fn, Driver, TestCase};
 
 struct OneShotTestCase;
 
@@ -9,19 +9,17 @@ impl<'b> TestCase<'b> for OneShotTestCase {
 
     fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        (OneShotSender(Some(tx)), rx)
-    }
-}
 
-struct OneShotSender(Option<tokio::sync::oneshot::Sender<()>>);
+        let mut tx = Some(tx);
+        let driver = drive_fn(move |()| {
+            if let Some(tx) = tx.take() {
+                tx.send(()).unwrap();
+            }
+        });
 
-impl Driver<'_> for OneShotSender {
-    type Args = ();
+        let future = rx;
 
-    fn poll(&mut self, args: ()) {
-        if let Some(tx) = self.0.take() {
-            tx.send(args).unwrap();
-        }
+        (driver, future)
     }
 }
 

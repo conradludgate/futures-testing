@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use diatomic_waker::DiatomicWaker;
-use futures_testing::{ArbitraryDefault, Driver, TestCase};
+use futures_testing::{drive_fn, ArbitraryDefault, Driver, TestCase};
 
 struct DiatomicWakerTestCase;
 
@@ -16,7 +16,11 @@ impl<'b> TestCase<'b> for DiatomicWakerTestCase {
         let mut sink = args.0.sink_ref();
         let source = sink.source_ref();
 
-        let sink = async move {
+        let driver = drive_fn(move |()| {
+            source.notify();
+        });
+
+        let future = async move {
             let mut i = 0;
             sink.wait_until(|| {
                 if i < 1 {
@@ -29,17 +33,7 @@ impl<'b> TestCase<'b> for DiatomicWakerTestCase {
             .await;
         };
 
-        (Source(source), sink)
-    }
-}
-
-struct Source<'a>(diatomic_waker::WakeSourceRef<'a>);
-
-impl Driver<'_> for Source<'_> {
-    type Args = ();
-
-    fn poll(&mut self, _args: ()) {
-        self.0.notify();
+        (driver, future)
     }
 }
 

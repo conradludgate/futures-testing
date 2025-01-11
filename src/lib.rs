@@ -8,31 +8,26 @@
 //! when running tasks within a `select`/`join`. This test framework also injects those spurious wake ups.
 //!
 //! ```
-//! use futures_testing::{Driver, TestCase};
+//! use std::future::Future;
+//! use futures_testing::{drive_fn, Driver, TestCase};
 //!
 //! struct OneShotTestCase;
 //!
 //! // Define the test case for a oneshot channel receiver.
-//! impl TestCase<'_> for OneShotTestCase {
-//!     type Future<'a> = tokio::sync::oneshot::Receiver<()>;
-//!     type Driver<'a> = OneShotSender;
-//!
+//! impl<'b> TestCase<'b> for OneShotTestCase {
 //!     type Args = ();
-//!     fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, Self::Future<'a>) {
+//!     fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
 //!         let (tx, rx) = tokio::sync::oneshot::channel();
-//!         (OneShotSender(Some(tx)), rx)
-//!     }
-//! }
 //!
-//! // Define the driver, in this case the channel sender.
-//! struct OneShotSender(Option<tokio::sync::oneshot::Sender<()>>);
+//!         // Define the driver, in this case the channel sender.
+//!         let mut tx = Some(tx);
+//!         let driver = drive_fn(move |()| {
+//!             if let Some(tx) = tx.take() {
+//!                 tx.send(()).unwrap();
+//!             }
+//!         });
 //!
-//! impl Driver<'_> for OneShotSender {
-//!     type Args = ();
-//!     fn poll(&mut self, args: ()) {
-//!         if let Some(tx) = self.0.take() {
-//!             tx.send(args).unwrap();
-//!         }
+//!         (driver, rx)
 //!     }
 //! }
 //!
@@ -120,31 +115,26 @@ impl Wake for TestWaker {
 /// use futures_testing::{Driver, TestCase};
 ///
 /// ```
-/// use futures_testing::{Driver, TestCase};
+/// use std::future::Future;
+/// use futures_testing::{drive_fn, Driver, TestCase};
 ///
 /// struct OneShotTestCase;
 ///
 /// // Define the test case for a oneshot channel receiver.
-/// impl TestCase<'_> for OneShotTestCase {
-///     type Future<'a> = tokio::sync::oneshot::Receiver<()>;
-///     type Driver<'a> = OneShotSender;
-///
+/// impl<'b> TestCase<'b> for OneShotTestCase {
 ///     type Args = ();
-///     fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, Self::Future<'a>) {
+///     fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
 ///         let (tx, rx) = tokio::sync::oneshot::channel();
-///         (OneShotSender(Some(tx)), rx)
-///     }
-/// }
 ///
-/// // Define the driver, in this case the channel sender.
-/// struct OneShotSender(Option<tokio::sync::oneshot::Sender<()>>);
+///         // Define the driver, in this case the channel sender.
+///         let mut tx = Some(tx);
+///         let driver = drive_fn(move |()| {
+///             if let Some(tx) = tx.take() {
+///                 tx.send(()).unwrap();
+///             }
+///         });
 ///
-/// impl Driver<'_> for OneShotSender {
-///     type Args = ();
-///     fn poll(&mut self, args: ()) {
-///         if let Some(tx) = self.0.take() {
-///             tx.send(args).unwrap();
-///         }
+///         (driver, rx)
 ///     }
 /// }
 ///

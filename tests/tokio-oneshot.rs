@@ -1,15 +1,15 @@
+use std::future::Future;
+
 use futures_testing::{Driver, TestCase};
 
 struct OneShotTestCase;
 
 impl TestCase<'_> for OneShotTestCase {
-    type Future<'a> = tokio::sync::oneshot::Receiver<()>;
-
     type Driver<'a> = OneShotSender;
 
     type Args = ();
 
-    fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, Self::Future<'a>) {
+    fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, impl Future) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (OneShotSender(Some(tx)), rx)
     }

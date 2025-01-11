@@ -8,13 +8,11 @@ use tokio::sync::mpsc;
 struct SpscFoldRecvTestCase;
 
 impl TestCase<'_> for SpscFoldRecvTestCase {
-    type Future<'a> = Pin<Box<dyn Future<Output = u8>>>;
-
     type Driver<'a> = TestSender;
 
     type Args = ();
 
-    fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, Self::Future<'a>) {
+    fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, impl Future) {
         let (mut sender, mut receiver) = channel();
         let (tx, mut rx) = mpsc::unbounded_channel::<u8>();
         let sender = Box::pin(async move {
@@ -31,7 +29,7 @@ impl TestCase<'_> for SpscFoldRecvTestCase {
                     .expect("receiver should not be gone")
             }
         });
-        let receiver = Box::pin(async move { receiver.recv().await.unwrap() });
+        let receiver = async move { receiver.recv().await.unwrap() };
 
         (TestSender(tx, sender), receiver)
     }
@@ -60,17 +58,15 @@ fn check_recv() {
 struct SpscFoldSendTestCase;
 
 impl TestCase<'_> for SpscFoldSendTestCase {
-    type Future<'a> = Pin<Box<dyn Future<Output = ()>>>;
-
     type Driver<'a> = TestReceiver;
 
     type Args = Vec<u8>;
 
-    fn init<'a>(&self, args: &'a mut Vec<u8>) -> (Self::Driver<'a>, Self::Future<'a>) {
+    fn init<'a>(&self, args: &'a mut Vec<u8>) -> (Self::Driver<'a>, impl Future) {
         let args = std::mem::take(args);
 
         let (mut sender, mut receiver) = channel();
-        let sender = Box::pin(async move {
+        let sender = async move {
             for t in args {
                 sender
                     .send(t, |t, u| match t.checked_add(u) {
@@ -83,7 +79,7 @@ impl TestCase<'_> for SpscFoldSendTestCase {
                     .await
                     .expect("receiver should not be gone")
             }
-        });
+        };
         let receiver = Box::pin(async move {
             loop {
                 receiver.recv().await.unwrap();

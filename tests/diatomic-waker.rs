@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::future::Future;
 
 use diatomic_waker::DiatomicWaker;
 use futures_testing::{ArbitraryDefault, Driver, TestCase};
@@ -6,8 +6,6 @@ use futures_testing::{ArbitraryDefault, Driver, TestCase};
 struct DiatomicWakerTestCase;
 
 impl TestCase<'_> for DiatomicWakerTestCase {
-    type Future<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
-
     type Driver<'a> = Source<'a>;
 
     // We don't need any randomness for DiatomicWaker, just a basic constructor.
@@ -16,11 +14,11 @@ impl TestCase<'_> for DiatomicWakerTestCase {
     fn init<'a>(
         &self,
         args: &'a mut ArbitraryDefault<DiatomicWaker>,
-    ) -> (Self::Driver<'a>, Self::Future<'a>) {
+    ) -> (Self::Driver<'a>, impl Future) {
         let mut sink = args.0.sink_ref();
         let source = sink.source_ref();
 
-        let sink = Box::pin(async move {
+        let sink = async move {
             let mut i = 0;
             sink.wait_until(|| {
                 if i < 1 {
@@ -31,7 +29,7 @@ impl TestCase<'_> for DiatomicWakerTestCase {
                 }
             })
             .await;
-        });
+        };
 
         (Source(source), sink)
     }

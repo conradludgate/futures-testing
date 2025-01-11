@@ -46,6 +46,7 @@ use core::{
     sync::atomic::AtomicBool,
     task::{Context, Waker},
 };
+use std::marker::PhantomData;
 
 extern crate alloc;
 
@@ -58,10 +59,7 @@ pub use arbitrary;
 
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
 pub trait TestCase<'b> {
-    /// The [`Future`] that is being tested for correctness
-    type Future<'a>: Future;
-
-    /// The [`Driver`] that is responsible for storing the [`Waker`] and making progress to the [`TestCase::Future`]
+    /// The [`Driver`] that is responsible for storing the [`Waker`] and making progress to the [`Future`]
     type Driver<'a>: Driver<'b>;
 
     /// The args that are used to seed the current test.
@@ -73,7 +71,7 @@ pub trait TestCase<'b> {
     ///
     /// This function should be deterministic. Any randomness should be derived from the [`TestCase::Args`] or from
     /// [`Driver::Args`]. You should not use interior mutability inside of `self`.
-    fn init<'a>(&self, args: &'a mut Self::Args) -> (Self::Driver<'a>, Self::Future<'a>);
+    fn init<'a>(&self, args: &'a mut Self::Args) -> (Self::Driver<'a>, impl Future);
 }
 
 /// A `Driver` is responsible for making a leaf future make progress.
@@ -90,6 +88,19 @@ pub trait Driver<'b> {
     /// # Implementation notes
     /// This function is allowed to block.
     fn poll(&mut self, args: Self::Args);
+}
+
+pub struct FnDriver<F, A>(F, PhantomData<A>);
+
+pub fn drive_fn<A: for<'b> Arbitrary<'b>, F: FnMut(A)>(f: F) -> FnDriver<F, A> {
+    FnDriver(f, PhantomData)
+}
+
+impl<'b, A: Arbitrary<'b>, F: FnMut(A)> Driver<'b> for FnDriver<F, A> {
+    type Args = A;
+    fn poll(&mut self, args: Self::Args) {
+        self.0(args)
+    }
 }
 
 struct TestWaker {

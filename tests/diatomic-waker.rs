@@ -5,16 +5,14 @@ use futures_testing::{ArbitraryDefault, Driver, TestCase};
 
 struct DiatomicWakerTestCase;
 
-impl TestCase<'_> for DiatomicWakerTestCase {
-    type Driver<'a> = Source<'a>;
-
+impl<'b> TestCase<'b> for DiatomicWakerTestCase {
     // We don't need any randomness for DiatomicWaker, just a basic constructor.
     type Args = ArbitraryDefault<DiatomicWaker>;
 
     fn init<'a>(
         &self,
         args: &'a mut ArbitraryDefault<DiatomicWaker>,
-    ) -> (Self::Driver<'a>, impl Future) {
+    ) -> (impl Driver<'b>, impl Future) {
         let mut sink = args.0.sink_ref();
         let source = sink.source_ref();
 

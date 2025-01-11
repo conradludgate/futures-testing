@@ -59,9 +59,6 @@ pub use arbitrary;
 
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
 pub trait TestCase<'b> {
-    /// The [`Driver`] that is responsible for storing the [`Waker`] and making progress to the [`Future`]
-    type Driver<'a>: Driver<'b>;
-
     /// The args that are used to seed the current test.
     type Args: Arbitrary<'b>;
 
@@ -71,7 +68,7 @@ pub trait TestCase<'b> {
     ///
     /// This function should be deterministic. Any randomness should be derived from the [`TestCase::Args`] or from
     /// [`Driver::Args`]. You should not use interior mutability inside of `self`.
-    fn init<'a>(&self, args: &'a mut Self::Args) -> (Self::Driver<'a>, impl Future);
+    fn init<'a>(&self, args: &'a mut Self::Args) -> (impl Driver<'b>, impl Future);
 }
 
 /// A `Driver` is responsible for making a leaf future make progress.

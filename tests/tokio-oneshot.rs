@@ -4,12 +4,10 @@ use futures_testing::{Driver, TestCase};
 
 struct OneShotTestCase;
 
-impl TestCase<'_> for OneShotTestCase {
-    type Driver<'a> = OneShotSender;
-
+impl<'b> TestCase<'b> for OneShotTestCase {
     type Args = ();
 
-    fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, impl Future) {
+    fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (OneShotSender(Some(tx)), rx)
     }

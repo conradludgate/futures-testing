@@ -7,12 +7,10 @@ use tokio::sync::mpsc;
 
 struct SpscFoldRecvTestCase;
 
-impl TestCase<'_> for SpscFoldRecvTestCase {
-    type Driver<'a> = TestSender;
-
+impl<'b> TestCase<'b> for SpscFoldRecvTestCase {
     type Args = ();
 
-    fn init<'a>(&self, _args: &'a mut ()) -> (Self::Driver<'a>, impl Future) {
+    fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
         let (mut sender, mut receiver) = channel();
         let (tx, mut rx) = mpsc::unbounded_channel::<u8>();
         let sender = Box::pin(async move {
@@ -57,12 +55,10 @@ fn check_recv() {
 
 struct SpscFoldSendTestCase;
 
-impl TestCase<'_> for SpscFoldSendTestCase {
-    type Driver<'a> = TestReceiver;
-
+impl<'b> TestCase<'b> for SpscFoldSendTestCase {
     type Args = Vec<u8>;
 
-    fn init<'a>(&self, args: &'a mut Vec<u8>) -> (Self::Driver<'a>, impl Future) {
+    fn init<'a>(&self, args: &'a mut Vec<u8>) -> (impl Driver<'b>, impl Future) {
         let args = std::mem::take(args);
 
         let (mut sender, mut receiver) = channel();

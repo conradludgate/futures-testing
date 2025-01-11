@@ -95,7 +95,7 @@ impl<'b> TestCase<'b> for SpscFoldSendTestCase {
 #[should_panic = "Waker passed to future was lost without being woken"]
 fn check_send_stall_regression() {
     futures_testing::tests(SpscFoldSendTestCase)
-        .seed(0x094766e000000009)
+        .seed(0x593baed900000005)
         .run();
 }
 

@@ -82,13 +82,23 @@ pub trait Driver<'b> {
     fn poll(&mut self, args: Self::Args);
 }
 
+/// See [`drive_fn`]
 pub struct FnDriver<F, A>(F, PhantomData<A>);
 
-pub fn drive_fn<A: for<'b> Arbitrary<'b>, F: FnMut(A)>(f: F) -> FnDriver<F, A> {
+/// A convenient method for constructing a [`Driver`] from a [`FnMut`]
+pub fn drive_fn<A, F>(f: F) -> FnDriver<F, A>
+where
+    A: for<'b> Arbitrary<'b>,
+    F: FnMut(A),
+{
     FnDriver(f, PhantomData)
 }
 
-impl<'b, A: Arbitrary<'b>, F: FnMut(A)> Driver<'b> for FnDriver<F, A> {
+impl<'b, A, F> Driver<'b> for FnDriver<F, A>
+where
+    A: Arbitrary<'b>,
+    F: FnMut(A),
+{
     type Args = A;
     fn poll(&mut self, args: Self::Args) {
         self.0(args)
@@ -156,8 +166,8 @@ where
     let (mut driver, future) = t.init(&mut args);
     let mut future = pin!(future);
 
-    for choice in u.arbitrary_iter::<Choice<_>>()? {
-        match choice? {
+    while !u.is_empty() {
+        match u.arbitrary::<Choice<_>>()? {
             Choice::Poll => {
                 let mut waker = Arc::new(TestWaker {
                     woken: AtomicBool::new(false),
@@ -196,7 +206,7 @@ enum Choice<A> {
 impl<'a, A: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Choice<A> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         match <u8 as arbitrary::Arbitrary>::arbitrary(u)? % 2 {
-            0 => Ok(Choice::Drive(arbitrary::Arbitrary::arbitrary(u)?)),
+            0 => Ok(Choice::Drive(u.arbitrary()?)),
             1 => Ok(Choice::Poll),
             _ => unreachable!(),
         }

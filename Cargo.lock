@@ -145,6 +145,7 @@ dependencies = [
  "diatomic-waker",
  "futures",
  "futures-util",
+ "pin-project-lite",
  "scopeguard",
  "tokio",
 ]

@@ -38,12 +38,17 @@ use core::marker::PhantomData;
 use core::pin::pin;
 use core::sync::atomic::AtomicBool;
 use core::task::Context;
-use std::{pin::Pin, sync::atomic::Ordering, task::Poll};
+use std::{
+    pin::Pin,
+    sync::atomic::Ordering,
+    task::{Poll, Waker},
+};
 
 pub use arbitrary;
 use arbitrary::{Arbitrary, Unstructured};
-use arbtest::{ArbTest, arbtest};
+use arbtest::{arbtest, ArbTest};
 use futures_util::task::waker_ref;
+use futures_util::Sink;
 
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
 pub trait TestCase {
@@ -65,20 +70,22 @@ pub trait TestCase {
 /// * if the leaf future is the receiver of a channel, the driver could be the channel sender.
 /// * if the leaf future is a timeout, the driver could be the timer system.
 pub trait Driver<'a> {
-    /// The args that are used to seed the next polling of this driver.
-    type Args: Arbitrary<'a>;
-
     /// Drive the corresponding leaf future to make some progress.
     ///
     /// It should return [`Poll::Ready`] if the future is ready to be polled again, [`Poll::Pending`] if unknown.
     ///
     /// # Implementation notes
     /// This function is allowed to block.
-    fn poll(&mut self, args: Self::Args) -> Poll<()>;
+    fn poll(self: Pin<&mut Self>, args: &mut Unstructured<'a>) -> arbitrary::Result<Poll<()>>;
 }
 
-/// See [`drive_fn`]
-pub struct FnDriver<F, A>(F, PhantomData<A>);
+pin_project_lite::pin_project!(
+    /// See [`drive_fn`]
+    pub struct FnDriver<F, A> {
+        f: F,
+        _arg: PhantomData<A>,
+    }
+);
 
 /// A convenient method for constructing a [`Driver`] from a [`FnMut`]
 pub fn drive_fn<A, F>(f: F) -> FnDriver<F, A>
@@ -86,7 +93,10 @@ where
     A: for<'a> Arbitrary<'a>,
     F: FnMut(A) -> Poll<()>,
 {
-    FnDriver(f, PhantomData)
+    FnDriver {
+        f,
+        _arg: PhantomData,
+    }
 }
 
 impl<'a, A, F> Driver<'a> for FnDriver<F, A>
@@ -94,9 +104,66 @@ where
     A: Arbitrary<'a>,
     F: FnMut(A) -> Poll<()>,
 {
-    type Args = A;
-    fn poll(&mut self, args: Self::Args) -> Poll<()> {
-        self.0(args)
+    fn poll(self: Pin<&mut Self>, args: &mut Unstructured<'a>) -> arbitrary::Result<Poll<()>> {
+        Ok((self.project().f)(args.arbitrary()?))
+    }
+}
+
+/// A convenient method for constructing a [`Driver`] from a [`Sink`]
+pub fn drive_sink<A, S>(sink: S) -> SinkDriver<S, A>
+where
+    A: for<'a> Arbitrary<'a>,
+    S: Sink<A, Error: std::fmt::Debug>,
+{
+    SinkDriver {
+        sink,
+        closing: false,
+        closed: false,
+        _arg: PhantomData,
+    }
+}
+
+pin_project_lite::pin_project!(
+    pub struct SinkDriver<S, A> {
+        #[pin]
+        sink: S,
+        closing: bool,
+        closed: bool,
+        _arg: PhantomData<A>,
+    }
+);
+
+impl<'a, S, A> Driver<'a> for SinkDriver<S, A>
+where
+    A: Arbitrary<'a>,
+    S: Sink<A, Error: std::fmt::Debug>,
+{
+    fn poll(self: Pin<&mut Self>, args: &mut Unstructured<'a>) -> arbitrary::Result<Poll<()>> {
+        let mut this = self.project();
+        let mut cx = Context::from_waker(Waker::noop());
+
+        if *this.closed {
+            return Ok(Poll::Pending);
+        }
+
+        // rare: close the sink
+        *this.closing = *this.closing || args.ratio(1u8, 255u8)?;
+        if *this.closing {
+            if let Poll::Ready(res) = this.sink.poll_close(&mut cx) {
+                res.unwrap();
+                *this.closed = true;
+            }
+        } else {
+            let Poll::Ready(res) = this.sink.as_mut().poll_ready(&mut cx) else {
+                return Ok(Poll::Pending);
+            };
+            res.unwrap();
+
+            this.sink.as_mut().start_send(args.arbitrary()?).unwrap();
+        }
+
+        // we don't know if the future should be ready.
+        Ok(Poll::Pending)
     }
 }
 
@@ -160,14 +227,15 @@ pub fn tests<T: TestCase>(
 
 fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let mut args = u.arbitrary()?;
-    let (mut driver, future) = t.init(&mut args);
+    let (driver, future) = t.init(&mut args);
+    let mut driver = pin!(driver);
     let mut future = pin!(future);
     let mut waker = Arc::new(TestWaker {
         woken: AtomicBool::new(true),
     });
 
     while !u.is_empty() {
-        match u.arbitrary::<Choice<_>>()? {
+        match u.arbitrary()? {
             Choice::ChangeWaker => {
                 waker = Arc::new(TestWaker {
                     woken: AtomicBool::new(true),
@@ -187,8 +255,8 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
                     return Ok(());
                 }
             }
-            Choice::Drive(args) => {
-                if driver.poll(args).is_ready() {
+            Choice::Drive => {
+                if driver.as_mut().poll(u)?.is_ready() {
                     let woken = waker.woken.load(Ordering::SeqCst);
                     assert!(woken, "future was not woken when driver made progress");
                 }
@@ -220,14 +288,14 @@ fn poll_fut(waker: &mut Arc<TestWaker>, f: Pin<&mut impl Future>) -> Poll<()> {
     Poll::Pending
 }
 
-enum Choice<A> {
+enum Choice {
     ChangeWaker,
     SpuriousPoll,
     Poll,
-    Drive(A),
+    Drive,
 }
 
-impl<'a, A: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Choice<A> {
+impl<'a> arbitrary::Arbitrary<'a> for Choice {
     #[inline]
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         // we want change waker and spurious poll to be rare.
@@ -235,33 +303,13 @@ impl<'a, A: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Choice<A> {
             0 => Ok(Choice::ChangeWaker),
             1 => Ok(Choice::SpuriousPoll),
             2..=128 => Ok(Choice::Poll),
-            129..=255 => Ok(Choice::Drive(u.arbitrary()?)),
+            129..=255 => Ok(Choice::Drive),
         }
     }
 
     #[inline]
-    fn arbitrary_take_rest(mut u: arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        // we want change waker and spurious poll to be rare.
-        match <u8 as arbitrary::Arbitrary>::arbitrary(&mut u)? {
-            0 => Ok(Choice::ChangeWaker),
-            1 => Ok(Choice::SpuriousPoll),
-            2..=128 => Ok(Choice::Poll),
-            129..=255 => Ok(Choice::Drive(Arbitrary::arbitrary_take_rest(u)?)),
-        }
-    }
-
-    #[inline]
-    fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        let (_, inner_size_hint) = A::size_hint(depth);
-        (1, inner_size_hint.map(|s| s + 1))
-    }
-
-    #[inline]
-    fn try_size_hint(
-        depth: usize,
-    ) -> Result<(usize, Option<usize>), arbitrary::MaxRecursionReached> {
-        let (_, inner_size_hint) = A::try_size_hint(depth)?;
-        Ok((1, inner_size_hint.map(|s| s + 1)))
+    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
+        (1, Some(1))
     }
 }
 

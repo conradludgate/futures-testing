@@ -1,7 +1,7 @@
 //! A testing framework for [`Future`]s.
 //!
 //! This framework ensures that futures can always make progress. It's surprisingly easy
-//! to forget to schedule the [`Waker`] when writing a future, but forgetting to do that
+//! to forget to schedule the [`Waker`](std::task::Waker) when writing a future, but forgetting to do that
 //! can cause your tasks to deadlock.
 //!
 //! Additionally, futures must be able to handle spurious wake ups, which is a common occurence
@@ -9,30 +9,26 @@
 //!
 //! ```
 //! use std::future::Future;
-//! use futures_testing::{drive_fn, Driver, TestCase};
+//! use futures_testing::{drive_fn, Driver, testcase};
 //!
-//! struct OneShotTestCase;
+//! let testcase = testcase!(|_args: &mut ()| {
+//!     let (tx, rx) = tokio::sync::oneshot::channel();
 //!
-//! // Define the test case for a oneshot channel receiver.
-//! impl<'b> TestCase<'b> for OneShotTestCase {
-//!     type Args = ();
-//!     fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
-//!         let (tx, rx) = tokio::sync::oneshot::channel();
+//!     // Define the driver, in this case the channel sender.
+//!     let mut tx = Some(tx);
+//!     let driver = drive_fn(move |()| {
+//!         if let Some(tx) = tx.take() {
+//!             tx.send(()).unwrap();
+//!             return std::task::Poll::Ready(()); // the receiver should be woken.
+//!         }
+//!         std::task::Poll::Pending
+//!     });
 //!
-//!         // Define the driver, in this case the channel sender.
-//!         let mut tx = Some(tx);
-//!         let driver = drive_fn(move |()| {
-//!             if let Some(tx) = tx.take() {
-//!                 tx.send(()).unwrap();
-//!             }
-//!         });
-//!
-//!         (driver, rx)
-//!     }
-//! }
+//!     (driver, rx)
+//! });
 //!
 //! // Run the tests
-//! futures_testing::tests(OneShotTestCase).run();
+//! futures_testing::tests(testcase).run();
 //! ```
 
 extern crate alloc;
@@ -42,17 +38,17 @@ use core::marker::PhantomData;
 use core::pin::pin;
 use core::sync::atomic::AtomicBool;
 use core::task::Context;
-use std::{pin::Pin, task::Poll};
+use std::{pin::Pin, sync::atomic::Ordering, task::Poll};
 
 pub use arbitrary;
 use arbitrary::{Arbitrary, Unstructured};
-use arbtest::{arbtest, ArbTest};
+use arbtest::{ArbTest, arbtest};
 use futures_util::task::waker_ref;
 
 /// A `TestCase` defines what [`Future`] needs to be tested for wake correctness, along with the [`Driver`] that manages it.
-pub trait TestCase<'b> {
+pub trait TestCase {
     /// The args that are used to seed the current test.
-    type Args: Arbitrary<'b>;
+    type Args<'a>: Arbitrary<'a>;
 
     /// `init` will construct a new instance of the future to test.
     ///
@@ -60,7 +56,7 @@ pub trait TestCase<'b> {
     ///
     /// This function should be deterministic. Any randomness should be derived from the [`TestCase::Args`] or from
     /// [`Driver::Args`]. You should not use interior mutability inside of `self`.
-    fn init<'a>(&self, args: &'a mut Self::Args) -> (impl Driver<'b>, impl Future);
+    fn init<'a>(&self, args: &mut Self::Args<'a>) -> (impl Driver<'a>, impl Future);
 }
 
 /// A `Driver` is responsible for making a leaf future make progress.
@@ -68,15 +64,17 @@ pub trait TestCase<'b> {
 /// For example:
 /// * if the leaf future is the receiver of a channel, the driver could be the channel sender.
 /// * if the leaf future is a timeout, the driver could be the timer system.
-pub trait Driver<'b> {
+pub trait Driver<'a> {
     /// The args that are used to seed the next polling of this driver.
-    type Args: Arbitrary<'b>;
+    type Args: Arbitrary<'a>;
 
     /// Drive the corresponding leaf future to make some progress.
     ///
+    /// It should return [`Poll::Ready`] if the future is ready to be polled again, [`Poll::Pending`] if unknown.
+    ///
     /// # Implementation notes
     /// This function is allowed to block.
-    fn poll(&mut self, args: Self::Args);
+    fn poll(&mut self, args: Self::Args) -> Poll<()>;
 }
 
 /// See [`drive_fn`]
@@ -85,21 +83,35 @@ pub struct FnDriver<F, A>(F, PhantomData<A>);
 /// A convenient method for constructing a [`Driver`] from a [`FnMut`]
 pub fn drive_fn<A, F>(f: F) -> FnDriver<F, A>
 where
-    A: for<'b> Arbitrary<'b>,
-    F: FnMut(A),
+    A: for<'a> Arbitrary<'a>,
+    F: FnMut(A) -> Poll<()>,
 {
     FnDriver(f, PhantomData)
 }
 
-impl<'b, A, F> Driver<'b> for FnDriver<F, A>
+impl<'a, A, F> Driver<'a> for FnDriver<F, A>
 where
-    A: Arbitrary<'b>,
-    F: FnMut(A),
+    A: Arbitrary<'a>,
+    F: FnMut(A) -> Poll<()>,
 {
     type Args = A;
-    fn poll(&mut self, args: Self::Args) {
+    fn poll(&mut self, args: Self::Args) -> Poll<()> {
         self.0(args)
     }
+}
+
+#[macro_export]
+macro_rules! testcase {
+    (|$args:ident: &mut $arg_ty:ty| $body:expr) => {{
+        struct TestCase;
+        impl $crate::TestCase for TestCase {
+            type Args<'a> = $arg_ty;
+            fn init<'a>(&self, $args: &mut $arg_ty) -> (impl Driver<'a>, impl Future) {
+                $body
+            }
+        }
+        TestCase
+    }};
 }
 
 struct TestWaker {
@@ -108,66 +120,79 @@ struct TestWaker {
 
 impl futures_util::task::ArcWake for TestWaker {
     fn wake_by_ref(this: &Arc<Self>) {
-        this.woken.store(true, std::sync::atomic::Ordering::SeqCst);
+        this.woken.store(true, Ordering::SeqCst);
     }
 }
 
 /// Construct the test runner for this [`TestCase`].
 ///
-/// See [`arbtest`] for more information about how to run tests.
+/// See [`arbtest`](mod@arbtest) for more information about how to run tests.
 /// use futures_testing::{Driver, TestCase};
 ///
 /// ```
 /// use std::future::Future;
-/// use futures_testing::{drive_fn, Driver, TestCase};
+/// use futures_testing::{drive_fn, Driver, testcase};
 ///
-/// struct OneShotTestCase;
+/// let testcase = testcase!(|_args: &mut ()| {
+///     let (tx, rx) = tokio::sync::oneshot::channel();
 ///
-/// // Define the test case for a oneshot channel receiver.
-/// impl<'b> TestCase<'b> for OneShotTestCase {
-///     type Args = ();
-///     fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
-///         let (tx, rx) = tokio::sync::oneshot::channel();
+///     // Define the driver, in this case the channel sender.
+///     let mut tx = Some(tx);
+///     let driver = drive_fn(move |()| {
+///         if let Some(tx) = tx.take() {
+///             tx.send(()).unwrap();
+///             return std::task::Poll::Ready(()); // the receiver should be woken.
+///         }
+///         std::task::Poll::Pending
+///     });
 ///
-///         // Define the driver, in this case the channel sender.
-///         let mut tx = Some(tx);
-///         let driver = drive_fn(move |()| {
-///             if let Some(tx) = tx.take() {
-///                 tx.send(()).unwrap();
-///             }
-///         });
-///
-///         (driver, rx)
-///     }
-/// }
+///     (driver, rx)
+/// });
 ///
 /// // Run the tests
-/// futures_testing::tests(OneShotTestCase).run();
+/// futures_testing::tests(testcase).run();
 /// ```
-pub fn tests<T>(mut t: T) -> ArbTest<impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>>
-where
-    T: for<'b> TestCase<'b>,
-{
+pub fn tests<T: TestCase>(
+    mut t: T,
+) -> ArbTest<impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>> {
     arbtest(move |u| test(&mut t, u))
 }
 
-fn test<'b, T>(t: &mut T, u: &mut Unstructured<'b>) -> arbitrary::Result<()>
-where
-    T: TestCase<'b>,
-{
+fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let mut args = u.arbitrary()?;
     let (mut driver, future) = t.init(&mut args);
     let mut future = pin!(future);
+    let mut waker = Arc::new(TestWaker {
+        woken: AtomicBool::new(true),
+    });
 
     while !u.is_empty() {
         match u.arbitrary::<Choice<_>>()? {
-            Choice::Poll => {
-                if poll_fut(future.as_mut()).is_ready() {
+            Choice::ChangeWaker => {
+                waker = Arc::new(TestWaker {
+                    woken: AtomicBool::new(true),
+                });
+            }
+            Choice::SpuriousPoll => {
+                waker.woken.store(false, Ordering::SeqCst);
+                if poll_fut(&mut waker, future.as_mut()).is_ready() {
                     // finished testing
                     return Ok(());
                 }
             }
-            Choice::Drive(args) => driver.poll(args),
+            Choice::Poll => {
+                let woken = waker.woken.swap(false, Ordering::SeqCst);
+                if woken && poll_fut(&mut waker, future.as_mut()).is_ready() {
+                    // finished testing
+                    return Ok(());
+                }
+            }
+            Choice::Drive(args) => {
+                if driver.poll(args).is_ready() {
+                    let woken = waker.woken.load(Ordering::SeqCst);
+                    assert!(woken, "future was not woken when driver made progress");
+                }
+            }
         }
     }
 
@@ -175,12 +200,8 @@ where
 }
 
 /// poll a [`Future`] and make sure the [`std::task::Waker`] was registered correctly.
-fn poll_fut(f: Pin<&mut impl Future>) -> Poll<()> {
-    let mut waker = Arc::new(TestWaker {
-        woken: AtomicBool::new(false),
-    });
-
-    let waker_ref = waker_ref(&waker);
+fn poll_fut(waker: &mut Arc<TestWaker>, f: Pin<&mut impl Future>) -> Poll<()> {
+    let waker_ref = waker_ref(waker);
     let mut cx = Context::from_waker(&waker_ref);
     if f.poll(&mut cx).is_ready() {
         // finished testing
@@ -188,7 +209,7 @@ fn poll_fut(f: Pin<&mut impl Future>) -> Poll<()> {
     }
 
     // if we can get mut access to this waker, then it was not registered anywhere
-    if let Some(waker) = Arc::get_mut(&mut waker) {
+    if let Some(waker) = Arc::get_mut(waker) {
         let woken = *waker.woken.get_mut();
         // if the waker was woken, then it's acceptable to be unregistered.
         if !woken {
@@ -200,41 +221,47 @@ fn poll_fut(f: Pin<&mut impl Future>) -> Poll<()> {
 }
 
 enum Choice<A> {
-    Drive(A),
+    ChangeWaker,
+    SpuriousPoll,
     Poll,
+    Drive(A),
 }
 
 impl<'a, A: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Choice<A> {
+    #[inline]
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        match <u8 as arbitrary::Arbitrary>::arbitrary(u)? % 2 {
-            0 => Ok(Choice::Drive(u.arbitrary()?)),
-            1 => Ok(Choice::Poll),
-            _ => unreachable!(),
+        // we want change waker and spurious poll to be rare.
+        match <u8 as arbitrary::Arbitrary>::arbitrary(u)? {
+            0 => Ok(Choice::ChangeWaker),
+            1 => Ok(Choice::SpuriousPoll),
+            2..=128 => Ok(Choice::Poll),
+            129..=255 => Ok(Choice::Drive(u.arbitrary()?)),
         }
     }
 
+    #[inline]
     fn arbitrary_take_rest(mut u: arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        match <u8 as arbitrary::Arbitrary>::arbitrary(&mut u)? % 2 {
-            0 => Ok(Choice::Drive(arbitrary::Arbitrary::arbitrary_take_rest(u)?)),
-            1 => Ok(Choice::Poll),
-            _ => unreachable!(),
+        // we want change waker and spurious poll to be rare.
+        match <u8 as arbitrary::Arbitrary>::arbitrary(&mut u)? {
+            0 => Ok(Choice::ChangeWaker),
+            1 => Ok(Choice::SpuriousPoll),
+            2..=128 => Ok(Choice::Poll),
+            129..=255 => Ok(Choice::Drive(Arbitrary::arbitrary_take_rest(u)?)),
         }
     }
 
+    #[inline]
     fn size_hint(depth: usize) -> (usize, Option<usize>) {
-        Self::try_size_hint(depth).unwrap_or_default()
+        let (_, inner_size_hint) = A::size_hint(depth);
+        (1, inner_size_hint.map(|s| s + 1))
     }
 
     #[inline]
     fn try_size_hint(
         depth: usize,
     ) -> Result<(usize, Option<usize>), arbitrary::MaxRecursionReached> {
-        Ok(arbitrary::size_hint::and(
-            (1, Some(1)),
-            arbitrary::size_hint::try_recursion_guard(depth, |depth| {
-                <A as arbitrary::Arbitrary>::try_size_hint(depth)
-            })?,
-        ))
+        let (_, inner_size_hint) = A::try_size_hint(depth)?;
+        Ok((1, inner_size_hint.map(|s| s + 1)))
     }
 }
 

@@ -1,29 +1,24 @@
 use std::future::Future;
 
-use futures_testing::{drive_fn, Driver, TestCase};
+use futures_testing::{drive_fn, testcase, Driver};
 
-struct OneShotTestCase;
-
-impl<'b> TestCase<'b> for OneShotTestCase {
-    type Args = ();
-
-    fn init<'a>(&self, _args: &'a mut ()) -> (impl Driver<'b>, impl Future) {
+#[test]
+fn oneshot() {
+    futures_testing::tests(testcase!(|_args: &mut ()| {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let mut tx = Some(tx);
         let driver = drive_fn(move |()| {
             if let Some(tx) = tx.take() {
                 tx.send(()).unwrap();
+                return std::task::Poll::Ready(());
             }
+            std::task::Poll::Pending
         });
 
         let future = rx;
 
         (driver, future)
-    }
-}
-
-#[test]
-fn oneshot() {
-    futures_testing::tests(OneShotTestCase).run();
+    }))
+    .run();
 }

@@ -1,23 +1,17 @@
 use std::future::Future;
 
 use diatomic_waker::DiatomicWaker;
-use futures_testing::{drive_fn, ArbitraryDefault, Driver, TestCase};
+use futures_testing::{ArbitraryDefault, Driver, drive_fn, testcase};
 
-struct DiatomicWakerTestCase;
-
-impl<'b> TestCase<'b> for DiatomicWakerTestCase {
-    // We don't need any randomness for DiatomicWaker, just a basic constructor.
-    type Args = ArbitraryDefault<DiatomicWaker>;
-
-    fn init<'a>(
-        &self,
-        args: &'a mut ArbitraryDefault<DiatomicWaker>,
-    ) -> (impl Driver<'b>, impl Future) {
+#[test]
+fn oneshot() {
+    futures_testing::tests(testcase!(|args: &mut ArbitraryDefault<DiatomicWaker>| {
         let mut sink = args.0.sink_ref();
         let source = sink.source_ref();
 
         let driver = drive_fn(move |()| {
             source.notify();
+            std::task::Poll::Ready(())
         });
 
         let future = async move {
@@ -34,10 +28,6 @@ impl<'b> TestCase<'b> for DiatomicWakerTestCase {
         };
 
         (driver, future)
-    }
-}
-
-#[test]
-fn oneshot() {
-    futures_testing::tests(DiatomicWakerTestCase).run();
+    }))
+    .run();
 }

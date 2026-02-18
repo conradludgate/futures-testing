@@ -1,7 +1,5 @@
-use std::future::Future;
-
 use diatomic_waker::DiatomicWaker;
-use futures_testing::{ArbitraryDefault, Driver, drive_fn, testcase};
+use futures_testing::{drive_fn, testcase, ArbitraryDefault, Driver};
 
 #[test]
 fn oneshot() {
@@ -14,7 +12,7 @@ fn oneshot() {
             std::task::Poll::Ready(())
         });
 
-        let future = async move {
+        let future = async move || {
             let mut i = 0;
             sink.wait_until(|| {
                 if i < 1 {

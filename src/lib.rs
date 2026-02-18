@@ -10,6 +10,7 @@
 //! ```
 //! use std::future::Future;
 //! use futures_testing::{drive_fn, Driver, testcase};
+//! # use futures_util::FutureExt;
 //!
 //! let testcase = testcase!(|_args: &mut ()| {
 //!     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -24,7 +25,10 @@
 //!         std::task::Poll::Pending
 //!     });
 //!
-//!     (driver, rx)
+//!     let mut rx = rx.fuse();
+//!     let factory = async move || { let _ = (&mut rx).await; };
+//!
+//!     (driver, factory)
 //! });
 //!
 //! // Run the tests
@@ -35,6 +39,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::future::Future;
 use core::marker::PhantomData;
+use core::ops::AsyncFnMut;
 use core::pin::pin;
 use core::sync::atomic::AtomicBool;
 use core::task::Context;
@@ -61,7 +66,7 @@ pub trait TestCase {
     ///
     /// This function should be deterministic. Any randomness should be derived from the [`TestCase::Args`] or from
     /// [`Driver::Args`]. You should not use interior mutability inside of `self`.
-    fn init<'a>(&self, args: &mut Self::Args<'a>) -> (impl Driver<'a>, impl Future);
+    fn init<'a>(&self, args: &mut Self::Args<'a>) -> (impl Driver<'a>, impl AsyncFnMut());
 }
 
 /// A `Driver` is responsible for making a leaf future make progress.
@@ -173,7 +178,7 @@ macro_rules! testcase {
         struct TestCase;
         impl $crate::TestCase for TestCase {
             type Args<'a> = $arg_ty;
-            fn init<'a>(&self, $args: &mut $arg_ty) -> (impl Driver<'a>, impl Future) {
+            fn init<'a>(&self, $args: &mut $arg_ty) -> (impl Driver<'a>, impl AsyncFnMut()) {
                 $body
             }
         }
@@ -199,6 +204,7 @@ impl futures_util::task::ArcWake for TestWaker {
 /// ```
 /// use std::future::Future;
 /// use futures_testing::{drive_fn, Driver, testcase};
+/// # use futures_util::FutureExt;
 ///
 /// let testcase = testcase!(|_args: &mut ()| {
 ///     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -213,7 +219,10 @@ impl futures_util::task::ArcWake for TestWaker {
 ///         std::task::Poll::Pending
 ///     });
 ///
-///     (driver, rx)
+///     let mut rx = rx.fuse();
+///     let factory = async move || { let _ = (&mut rx).await; };
+///
+///     (driver, factory)
 /// });
 ///
 /// // Run the tests
@@ -227,9 +236,9 @@ pub fn tests<T: TestCase>(
 
 fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let mut args = u.arbitrary()?;
-    let (driver, future) = t.init(&mut args);
+    let (driver, mut factory) = t.init(&mut args);
     let mut driver = pin!(driver);
-    let mut future = pin!(future);
+    let mut future = pin!(factory());
     let mut waker = Arc::new(TestWaker {
         woken: AtomicBool::new(true),
     });

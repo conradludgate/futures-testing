@@ -1,5 +1,4 @@
-use std::future::Future;
-
+use futures::FutureExt;
 use futures_testing::{drive_fn, testcase, Driver};
 
 #[test]
@@ -16,9 +15,12 @@ fn oneshot() {
             std::task::Poll::Pending
         });
 
-        let future = rx;
+        let mut rx = rx.fuse();
+        let factory = async move || {
+            let _ = (&mut rx).await;
+        };
 
-        (driver, future)
+        (driver, factory)
     }))
     .run();
 }

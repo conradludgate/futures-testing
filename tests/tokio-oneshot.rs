@@ -9,7 +9,7 @@ fn oneshot() {
         let mut tx = Some(tx);
         let driver = drive_fn(move |()| {
             if let Some(tx) = tx.take() {
-                tx.send(()).unwrap();
+                let _ = tx.send(());
                 return std::task::Poll::Ready(ControlFlow::Break(()));
             }
             std::task::Poll::Pending

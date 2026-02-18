@@ -8,30 +8,25 @@
 //! when running tasks within a `select`/`join`. This test framework also injects those spurious wake ups.
 //!
 //! ```
-//! use std::future::Future;
 //! use std::ops::ControlFlow;
 //! use futures_testing::{drive_fn, Driver, testcase};
-//! # use futures_util::FutureExt;
+//! use futures::StreamExt;
 //!
 //! let testcase = testcase!(|_args: &mut ()| {
-//!     let (tx, rx) = tokio::sync::oneshot::channel();
+//!     let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 //!
-//!     // Define the driver, in this case the channel sender.
-//!     let mut tx = Some(tx);
-//!     let driver = drive_fn(move |()| {
-//!         if let Some(tx) = tx.take() {
-//!             tx.send(()).unwrap();
-//!             // Break signals the driver is done, exit after current future completes.
-//!             return std::task::Poll::Ready(ControlFlow::Break(()));
+//!     // Define the driver - sends items to the channel.
+//!     let driver = drive_fn(move |item: u8| {
+//!         match tx.try_send(item) {
+//!             Ok(()) => std::task::Poll::Ready(ControlFlow::Continue(())),
+//!             Err(_) => std::task::Poll::Pending,
 //!         }
-//!         std::task::Poll::Pending
 //!     });
 //!
-//!     let mut rx = Some(rx);
+//!     // Factory creates futures that receive from the channel.
+//!     // This is cancellation-safe - the channel persists across cancellations.
 //!     let factory = async move || {
-//!         if let Some(rx) = rx.take() {
-//!             let _ = rx.await;
-//!         }
+//!         let _ = rx.next().await;
 //!     };
 //!
 //!     (driver, factory)
@@ -221,30 +216,25 @@ impl futures_util::task::ArcWake for TestWaker {
 /// use futures_testing::{Driver, TestCase};
 ///
 /// ```
-/// use std::future::Future;
 /// use std::ops::ControlFlow;
 /// use futures_testing::{drive_fn, Driver, testcase};
-/// # use futures_util::FutureExt;
+/// use futures::StreamExt;
 ///
 /// let testcase = testcase!(|_args: &mut ()| {
-///     let (tx, rx) = tokio::sync::oneshot::channel();
+///     let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 ///
-///     // Define the driver, in this case the channel sender.
-///     let mut tx = Some(tx);
-///     let driver = drive_fn(move |()| {
-///         if let Some(tx) = tx.take() {
-///             tx.send(()).unwrap();
-///             // Break signals the driver is done.
-///             return std::task::Poll::Ready(ControlFlow::Break(()));
+///     // Define the driver - sends items to the channel.
+///     let driver = drive_fn(move |item: u8| {
+///         match tx.try_send(item) {
+///             Ok(()) => std::task::Poll::Ready(ControlFlow::Continue(())),
+///             Err(_) => std::task::Poll::Pending,
 ///         }
-///         std::task::Poll::Pending
 ///     });
 ///
-///     let mut rx = Some(rx);
+///     // Factory creates futures that receive from the channel.
+///     // This is cancellation-safe - the channel persists across cancellations.
 ///     let factory = async move || {
-///         if let Some(rx) = rx.take() {
-///             let _ = rx.await;
-///         }
+///         let _ = rx.next().await;
 ///     };
 ///
 ///     (driver, factory)
@@ -305,6 +295,7 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
                         }
                     }
                 }
+                Choice::Cancel => break,
             }
         }
     }
@@ -338,17 +329,19 @@ enum Choice {
     SpuriousPoll,
     Poll,
     Drive,
+    Cancel,
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for Choice {
     #[inline]
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        // we want change waker and spurious poll to be rare.
+        // we want change waker, spurious poll, and cancel to be rare.
         match <u8 as arbitrary::Arbitrary>::arbitrary(u)? {
             0 => Ok(Choice::ChangeWaker),
             1 => Ok(Choice::SpuriousPoll),
-            2..=128 => Ok(Choice::Poll),
-            129..=255 => Ok(Choice::Drive),
+            2 => Ok(Choice::Cancel),
+            3..=129 => Ok(Choice::Poll),
+            130..=255 => Ok(Choice::Drive),
         }
     }
 

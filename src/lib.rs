@@ -9,6 +9,7 @@
 //!
 //! ```
 //! use std::future::Future;
+//! use std::ops::ControlFlow;
 //! use futures_testing::{drive_fn, Driver, testcase};
 //! # use futures_util::FutureExt;
 //!
@@ -20,13 +21,18 @@
 //!     let driver = drive_fn(move |()| {
 //!         if let Some(tx) = tx.take() {
 //!             tx.send(()).unwrap();
-//!             return std::task::Poll::Ready(()); // the receiver should be woken.
+//!             // Break signals the driver is done, exit after current future completes.
+//!             return std::task::Poll::Ready(ControlFlow::Break(()));
 //!         }
 //!         std::task::Poll::Pending
 //!     });
 //!
-//!     let mut rx = rx.fuse();
-//!     let factory = async move || { let _ = (&mut rx).await; };
+//!     let mut rx = Some(rx);
+//!     let factory = async move || {
+//!         if let Some(rx) = rx.take() {
+//!             let _ = rx.await;
+//!         }
+//!     };
 //!
 //!     (driver, factory)
 //! });
@@ -39,7 +45,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 use core::future::Future;
 use core::marker::PhantomData;
-use core::ops::AsyncFnMut;
+use core::ops::{AsyncFnMut, ControlFlow};
 use core::pin::pin;
 use core::sync::atomic::AtomicBool;
 use core::task::Context;
@@ -77,11 +83,17 @@ pub trait TestCase {
 pub trait Driver<'a> {
     /// Drive the corresponding leaf future to make some progress.
     ///
-    /// It should return [`Poll::Ready`] if the future is ready to be polled again, [`Poll::Pending`] if unknown.
+    /// Returns:
+    /// - `Poll::Ready(ControlFlow::Continue(()))` - progress made, future may be ready
+    /// - `Poll::Ready(ControlFlow::Break(()))` - driver is done, exit after current future completes
+    /// - `Poll::Pending` - no progress
     ///
     /// # Implementation notes
     /// This function is allowed to block.
-    fn poll(self: Pin<&mut Self>, args: &mut Unstructured<'a>) -> arbitrary::Result<Poll<()>>;
+    fn poll(
+        self: Pin<&mut Self>,
+        args: &mut Unstructured<'a>,
+    ) -> arbitrary::Result<Poll<ControlFlow<()>>>;
 }
 
 pin_project_lite::pin_project!(
@@ -96,7 +108,7 @@ pin_project_lite::pin_project!(
 pub fn drive_fn<A, F>(f: F) -> FnDriver<F, A>
 where
     A: for<'a> Arbitrary<'a>,
-    F: FnMut(A) -> Poll<()>,
+    F: FnMut(A) -> Poll<ControlFlow<()>>,
 {
     FnDriver {
         f,
@@ -107,9 +119,12 @@ where
 impl<'a, A, F> Driver<'a> for FnDriver<F, A>
 where
     A: Arbitrary<'a>,
-    F: FnMut(A) -> Poll<()>,
+    F: FnMut(A) -> Poll<ControlFlow<()>>,
 {
-    fn poll(self: Pin<&mut Self>, args: &mut Unstructured<'a>) -> arbitrary::Result<Poll<()>> {
+    fn poll(
+        self: Pin<&mut Self>,
+        args: &mut Unstructured<'a>,
+    ) -> arbitrary::Result<Poll<ControlFlow<()>>> {
         Ok((self.project().f)(args.arbitrary()?))
     }
 }
@@ -143,12 +158,15 @@ where
     A: Arbitrary<'a>,
     S: Sink<A, Error: std::fmt::Debug>,
 {
-    fn poll(self: Pin<&mut Self>, args: &mut Unstructured<'a>) -> arbitrary::Result<Poll<()>> {
+    fn poll(
+        self: Pin<&mut Self>,
+        args: &mut Unstructured<'a>,
+    ) -> arbitrary::Result<Poll<ControlFlow<()>>> {
         let mut this = self.project();
         let mut cx = Context::from_waker(Waker::noop());
 
         if *this.closed {
-            return Ok(Poll::Pending);
+            return Ok(Poll::Ready(ControlFlow::Break(())));
         }
 
         // rare: close the sink
@@ -157,6 +175,7 @@ where
             if let Poll::Ready(res) = this.sink.poll_close(&mut cx) {
                 res.unwrap();
                 *this.closed = true;
+                return Ok(Poll::Ready(ControlFlow::Break(())));
             }
         } else {
             let Poll::Ready(res) = this.sink.as_mut().poll_ready(&mut cx) else {
@@ -203,6 +222,7 @@ impl futures_util::task::ArcWake for TestWaker {
 ///
 /// ```
 /// use std::future::Future;
+/// use std::ops::ControlFlow;
 /// use futures_testing::{drive_fn, Driver, testcase};
 /// # use futures_util::FutureExt;
 ///
@@ -214,13 +234,18 @@ impl futures_util::task::ArcWake for TestWaker {
 ///     let driver = drive_fn(move |()| {
 ///         if let Some(tx) = tx.take() {
 ///             tx.send(()).unwrap();
-///             return std::task::Poll::Ready(()); // the receiver should be woken.
+///             // Break signals the driver is done.
+///             return std::task::Poll::Ready(ControlFlow::Break(()));
 ///         }
 ///         std::task::Poll::Pending
 ///     });
 ///
-///     let mut rx = rx.fuse();
-///     let factory = async move || { let _ = (&mut rx).await; };
+///     let mut rx = Some(rx);
+///     let factory = async move || {
+///         if let Some(rx) = rx.take() {
+///             let _ = rx.await;
+///         }
+///     };
 ///
 ///     (driver, factory)
 /// });
@@ -236,44 +261,55 @@ pub fn tests<T: TestCase>(
 
 fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let mut args = u.arbitrary()?;
+    let completions_needed = u.int_in_range(1..=4)?;
     let (driver, mut factory) = t.init(&mut args);
     let mut driver = pin!(driver);
-    let mut future = pin!(factory());
     let mut waker = Arc::new(TestWaker {
         woken: AtomicBool::new(true),
     });
+    let mut completions = 0;
+    let mut driver_done = false;
 
-    while !u.is_empty() {
-        match u.arbitrary()? {
-            Choice::ChangeWaker => {
-                waker = Arc::new(TestWaker {
-                    woken: AtomicBool::new(true),
-                });
-            }
-            Choice::SpuriousPoll => {
-                waker.woken.store(false, Ordering::SeqCst);
-                if poll_fut(&mut waker, future.as_mut()).is_ready() {
-                    // finished testing
-                    return Ok(());
+    while completions < completions_needed && !driver_done {
+        let mut future = pin!(factory());
+
+        loop {
+            match u.arbitrary()? {
+                Choice::ChangeWaker => {
+                    waker = Arc::new(TestWaker {
+                        woken: AtomicBool::new(true),
+                    });
                 }
-            }
-            Choice::Poll => {
-                let woken = waker.woken.swap(false, Ordering::SeqCst);
-                if woken && poll_fut(&mut waker, future.as_mut()).is_ready() {
-                    // finished testing
-                    return Ok(());
+                Choice::SpuriousPoll => {
+                    waker.woken.store(false, Ordering::SeqCst);
+                    if poll_fut(&mut waker, future.as_mut()).is_ready() {
+                        completions += 1;
+                        waker.woken.store(true, Ordering::SeqCst);
+                        break;
+                    }
                 }
-            }
-            Choice::Drive => {
-                if driver.as_mut().poll(u)?.is_ready() {
-                    let woken = waker.woken.load(Ordering::SeqCst);
-                    assert!(woken, "future was not woken when driver made progress");
+                Choice::Poll => {
+                    let woken = waker.woken.swap(false, Ordering::SeqCst);
+                    if woken && poll_fut(&mut waker, future.as_mut()).is_ready() {
+                        completions += 1;
+                        waker.woken.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                Choice::Drive => {
+                    if let Poll::Ready(cf) = driver.as_mut().poll(u)? {
+                        let woken = waker.woken.load(Ordering::SeqCst);
+                        assert!(woken, "future was not woken when driver made progress");
+                        if cf.is_break() {
+                            driver_done = true;
+                        }
+                    }
                 }
             }
         }
     }
 
-    Err(arbitrary::Error::NotEnoughData)
+    Ok(())
 }
 
 /// poll a [`Future`] and make sure the [`std::task::Waker`] was registered correctly.

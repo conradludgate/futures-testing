@@ -1,5 +1,5 @@
-use futures::FutureExt;
 use futures_testing::{drive_fn, testcase, Driver};
+use std::ops::ControlFlow;
 
 #[test]
 fn oneshot() {
@@ -10,14 +10,17 @@ fn oneshot() {
         let driver = drive_fn(move |()| {
             if let Some(tx) = tx.take() {
                 tx.send(()).unwrap();
-                return std::task::Poll::Ready(());
+                return std::task::Poll::Ready(ControlFlow::Break(()));
             }
             std::task::Poll::Pending
         });
 
-        let mut rx = rx.fuse();
+        let mut rx = Some(rx);
         let factory = async move || {
-            let _ = (&mut rx).await;
+            if let Some(inner_rx) = rx.as_mut() {
+                let _ = inner_rx.await;
+                rx = None;
+            }
         };
 
         (driver, factory)

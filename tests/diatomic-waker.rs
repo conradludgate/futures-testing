@@ -1,5 +1,6 @@
 use diatomic_waker::DiatomicWaker;
 use futures_testing::{drive_fn, testcase, ArbitraryDefault, Driver};
+use std::ops::ControlFlow;
 
 #[test]
 fn oneshot() {
@@ -9,7 +10,7 @@ fn oneshot() {
 
         let driver = drive_fn(move |()| {
             source.notify();
-            std::task::Poll::Ready(())
+            std::task::Poll::Ready(ControlFlow::Continue(()))
         });
 
         let future = async move || {

@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 
 #[test]
 fn mpsc_rx() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
+    futures_testing::tests(testcase!(|| {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(4);
 
         let driver = drive_fn(async move |item: u8| match tx.send(item).await {
@@ -22,7 +22,7 @@ fn mpsc_rx() {
 
 #[test]
 fn mpsc_tx() {
-    futures_testing::tests(testcase!(|_args: &mut ()| -> u8 {
+    futures_testing::tests(testcase!(|| -> u8 {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(4);
 
         let driver = drive_fn(async move |_: ()| match rx.recv().await {

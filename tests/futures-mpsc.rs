@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 #[test]
 fn mpsc() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
+    futures_testing::tests(testcase!(|| {
         let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 
         let driver = drive_poll_fn(move |item: u8| match tx.try_send(item) {

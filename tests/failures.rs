@@ -17,7 +17,7 @@ use std::task::{Poll, Waker};
 #[test]
 #[should_panic(expected = "future was not woken when driver made progress")]
 fn oneshot_cancel_unsafe() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
+    futures_testing::tests(testcase!(|| {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         let mut tx = Some(tx);

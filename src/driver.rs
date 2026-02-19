@@ -21,7 +21,10 @@ pin_project_lite::pin_project!(
     }
 );
 
-/// A convenient method for constructing a [`Driver`] from a poll-style [`FnMut`].
+/// Construct a [`Driver`] from a synchronous [`FnMut`].
+///
+/// Use this when the driver logic doesn't need `.await` (e.g. `try_send` on a
+/// channel).
 ///
 /// The function receives an arbitrary argument and returns `Poll<ControlFlow<()>>`:
 /// - `Poll::Ready(ControlFlow::Continue(()))` - progress made
@@ -57,7 +60,9 @@ pub struct AsyncFnDriver<F, A> {
     _arg: PhantomData<fn(A)>,
 }
 
-/// A convenient method for constructing a [`Driver`] from an [`AsyncFnMut`].
+/// Construct a [`Driver`] from an [`AsyncFnMut`].
+///
+/// Use this when the driver needs `.await` (e.g. `tx.send(item).await`).
 ///
 /// The async function receives an arbitrary argument and returns `ControlFlow<()>`:
 /// - `ControlFlow::Continue(())` - progress made, future should be polled
@@ -93,7 +98,11 @@ where
     }
 }
 
-/// A convenient method for constructing a [`Driver`] from a [`Sink`]
+/// Construct a [`Driver`] from a [`Sink`].
+///
+/// Use this when the driver side already implements [`Sink`] (e.g. the sender
+/// half of a `futures::channel::mpsc`). Handles `poll_ready`, `start_send`,
+/// and `poll_close` automatically.
 pub fn drive_sink<A, S>(sink: S) -> SinkDriver<S, A>
 where
     A: for<'a> Arbitrary<'a>,

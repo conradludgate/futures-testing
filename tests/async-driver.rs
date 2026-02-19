@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 #[test]
 fn async_driver() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
+    futures_testing::tests(testcase!(|| {
         let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 
         // Async driver using async || syntax

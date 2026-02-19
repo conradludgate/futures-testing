@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 
 #[test]
 fn oneshot() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
+    futures_testing::tests(testcase!(|| {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let mut tx = Some(tx);

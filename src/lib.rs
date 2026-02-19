@@ -318,10 +318,16 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
 
     while completions < completions_needed && !driver_done {
         let mut future = pin!(factory(u.arbitrary()?));
+        let mut v: u8 = u.arbitrary()?;
 
         loop {
-            match u.arbitrary()? {
+            v = v.wrapping_mul(113).wrapping_add(1);
+
+            match Choice::from(v) {
                 Choice::ChangeWaker => {
+                    if !waker.woken.swap(false, Ordering::SeqCst) {
+                        continue;
+                    }
                     waker = Arc::new(TestWaker {
                         woken: AtomicBool::new(true),
                     });
@@ -335,8 +341,10 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
                     }
                 }
                 Choice::Poll => {
-                    let woken = waker.woken.swap(false, Ordering::SeqCst);
-                    if woken && poll_fut(&mut waker, future.as_mut()).is_ready() {
+                    if !waker.woken.swap(false, Ordering::SeqCst) {
+                        continue;
+                    }
+                    if poll_fut(&mut waker, future.as_mut()).is_ready() {
                         completions += 1;
                         waker.woken.store(true, Ordering::SeqCst);
                         break;
@@ -353,6 +361,8 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
                 }
                 Choice::Cancel => break,
             }
+
+            v = u.arbitrary()?;
         }
     }
 
@@ -388,22 +398,16 @@ enum Choice {
     Cancel,
 }
 
-impl<'a> arbitrary::Arbitrary<'a> for Choice {
-    #[inline]
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+impl From<u8> for Choice {
+    fn from(value: u8) -> Self {
         // we want change waker, spurious poll, and cancel to be rare.
-        match <u8 as arbitrary::Arbitrary>::arbitrary(u)? {
-            0 => Ok(Choice::ChangeWaker),
-            1 => Ok(Choice::SpuriousPoll),
-            2 => Ok(Choice::Cancel),
-            3..=129 => Ok(Choice::Poll),
-            130..=255 => Ok(Choice::Drive),
+        match value {
+            0 => Choice::ChangeWaker,
+            1 => Choice::SpuriousPoll,
+            2 => Choice::Cancel,
+            3..=129 => Choice::Poll,
+            130..=255 => Choice::Drive,
         }
-    }
-
-    #[inline]
-    fn size_hint(_depth: usize) -> (usize, Option<usize>) {
-        (1, Some(1))
     }
 }
 

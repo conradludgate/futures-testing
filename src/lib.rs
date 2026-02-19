@@ -320,7 +320,14 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
         let mut future = pin!(factory(u.arbitrary()?));
         let mut v: u8 = u.arbitrary()?;
 
+        let mut noop_count: u8 = 0;
+
         loop {
+            // Full permutation cycle with no progress — the test state is deadlocked.
+            noop_count = noop_count.wrapping_add(1);
+            if noop_count == 0 {
+                return Err(arbitrary::Error::NotEnoughData);
+            }
             v = v.wrapping_mul(113).wrapping_add(1);
 
             match Choice::from(v) {
@@ -363,6 +370,7 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
             }
 
             v = u.arbitrary()?;
+            noop_count = 0;
         }
     }
 

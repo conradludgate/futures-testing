@@ -1,10 +1,8 @@
-use futures_testing::{drive_poll_fn, testcase};
-use std::future::Future;
+use futures_testing::{drive_poll_fn, testcase, ArbitraryDefault};
 use std::ops::ControlFlow;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::sync::Mutex;
+use std::task::{Poll, Waker};
 
 /// This test demonstrates a cancel-unsafe pattern: consuming the sender before
 /// the receiver completes. If cancelled after send but before receive, the
@@ -40,24 +38,8 @@ fn oneshot_cancel_unsafe() {
 
         (driver, factory)
     }))
-    .seed(0xaf251b5f00000003)
+    .seed(0xa864491700000001)
     .run();
-}
-
-/// A future that never registers the waker -- it just polls shared state.
-struct NoWakerFuture {
-    ready: Arc<AtomicBool>,
-}
-
-impl Future for NoWakerFuture {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-        if self.ready.load(Ordering::SeqCst) {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
 }
 
 /// This test demonstrates a future that never registers the waker.
@@ -66,19 +48,22 @@ impl Future for NoWakerFuture {
 #[test]
 #[should_panic(expected = "Waker passed to future was lost without being woken")]
 fn no_waker_registration() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
-        let ready = Arc::new(AtomicBool::new(false));
+    futures_testing::tests(testcase!(|args: &mut ArbitraryDefault<AtomicBool>| {
+        let ready = &args.0;
 
-        let ready2 = ready.clone();
         let driver = drive_poll_fn(move |()| {
-            ready2.store(true, Ordering::SeqCst);
+            ready.store(true, Ordering::SeqCst);
             Poll::Ready(ControlFlow::Break(()))
         });
 
         let factory = async move |_: ()| {
-            NoWakerFuture {
-                ready: ready.clone(),
-            }
+            std::future::poll_fn(|_cx| {
+                if ready.load(Ordering::SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
             .await
         };
 
@@ -86,33 +71,6 @@ fn no_waker_registration() {
     }))
     .seed(0xe46e62a900000001)
     .run();
-}
-
-/// A future that shares a counter with its driver. The invariant: future
-/// and driver alternate increments, so after the future increments the
-/// counter should always be odd. The implementation just does `+= 1` each
-/// time, so a spurious poll (two future polls in a row) produces an even
-/// value, violating the invariant.
-struct TurnCounter {
-    counter: Arc<AtomicUsize>,
-    waker_store: Arc<Mutex<Option<Waker>>>,
-}
-
-impl Future for TurnCounter {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        match self.counter.fetch_add(1, Ordering::SeqCst) {
-            0 => {
-                *self.waker_store.lock().unwrap() = Some(cx.waker().clone());
-                Poll::Pending
-            }
-            2 => Poll::Ready(()),
-            n => panic!(
-                "polled without driver making progress: counter is {}",
-                n + 1
-            ),
-        }
-    }
 }
 
 /// This test demonstrates a future that breaks under spurious polling
@@ -126,15 +84,16 @@ impl Future for TurnCounter {
 #[test]
 #[should_panic(expected = "polled without driver making progress")]
 fn spurious_poll() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let waker_store: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+    futures_testing::tests(testcase!(|args: &mut ArbitraryDefault<(
+        AtomicUsize,
+        Mutex<Option<Waker>>
+    )>| {
+        let counter = &args.0 .0;
+        let waker_store = &args.0 .1;
 
-        let counter_d = counter.clone();
-        let waker_d = waker_store.clone();
         let driver = drive_poll_fn(move |()| {
-            if let Some(w) = waker_d.lock().unwrap().take() {
-                assert_eq!(counter_d.fetch_add(1, Ordering::SeqCst), 1);
+            if let Some(w) = waker_store.lock().unwrap().take() {
+                assert_eq!(counter.fetch_add(1, Ordering::SeqCst), 1);
                 w.wake();
             }
             Poll::Ready(ControlFlow::Continue(()))
@@ -142,10 +101,17 @@ fn spurious_poll() {
 
         let factory = async move |_: ()| {
             counter.store(0, Ordering::SeqCst);
-            TurnCounter {
-                counter: counter.clone(),
-                waker_store: waker_store.clone(),
-            }
+            std::future::poll_fn(|cx| match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    *waker_store.lock().unwrap() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                2 => Poll::Ready(()),
+                n => panic!(
+                    "polled without driver making progress: counter is {}",
+                    n + 1
+                ),
+            })
             .await
         };
 
@@ -153,26 +119,6 @@ fn spurious_poll() {
     }))
     .seed(0x82b7a72500000000)
     .run();
-}
-
-/// A future that registers the waker on the first poll but never updates it.
-/// It shares the initial waker with the driver so the driver can wake it,
-/// but after a ChangeWaker event the new waker is never stored.
-struct StaleWakerFuture {
-    stored_waker: Option<Waker>,
-    waker_share: Arc<Mutex<Option<Waker>>>,
-}
-
-impl Future for StaleWakerFuture {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let this = self.get_mut();
-        if this.stored_waker.is_none() {
-            this.stored_waker = Some(cx.waker().clone());
-            *this.waker_share.lock().unwrap() = Some(cx.waker().clone());
-        }
-        Poll::Pending
-    }
 }
 
 /// This test demonstrates a future that stores the waker once but never
@@ -188,12 +134,13 @@ impl Future for StaleWakerFuture {
 #[test]
 #[should_panic(expected = "Waker passed to future was lost without being woken")]
 fn stale_waker() {
-    futures_testing::tests(testcase!(|_args: &mut ()| {
-        let waker_store: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+    futures_testing::tests(testcase!(|args: &mut ArbitraryDefault<
+        Mutex<Option<Waker>>,
+    >| {
+        let waker_store = &args.0;
 
-        let waker_d = waker_store.clone();
         let driver = drive_poll_fn(move |()| {
-            let guard = waker_d.lock().unwrap();
+            let guard = waker_store.lock().unwrap();
             if let Some(w) = guard.as_ref() {
                 w.wake_by_ref();
                 Poll::Ready(ControlFlow::Continue(()))
@@ -203,15 +150,19 @@ fn stale_waker() {
         });
 
         let factory = async move |_: ()| {
-            StaleWakerFuture {
-                stored_waker: None,
-                waker_share: waker_store.clone(),
-            }
+            let mut stored_waker: Option<Waker> = None;
+            std::future::poll_fn(|cx| {
+                if stored_waker.is_none() {
+                    stored_waker = Some(cx.waker().clone());
+                    *waker_store.lock().unwrap() = Some(cx.waker().clone());
+                }
+                Poll::Pending
+            })
             .await
         };
 
         (driver, factory)
     }))
-    .seed(0x5f50ece0000001f4)
+    .seed(0x1cc3a7f600000001)
     .run();
 }

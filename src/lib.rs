@@ -23,9 +23,7 @@
 //!         }
 //!     });
 //!
-//!     // Factory creates futures that receive from the channel.
-//!     // This is cancellation-safe - the channel persists across cancellations.
-//!     let factory = async move || {
+//!     let factory = async move |_: ()| {
 //!         let _ = rx.next().await;
 //!     };
 //!
@@ -61,13 +59,19 @@ pub trait TestCase {
     /// The args that are used to seed the current test.
     type Args<'a>: Arbitrary<'a>;
 
+    /// The type of item passed to the factory on each invocation, generated via [`Arbitrary`].
+    type FactoryItem<'a>: Arbitrary<'a>;
+
     /// `init` will construct a new instance of the future to test.
     ///
     /// # Implementation notes
     ///
     /// This function should be deterministic. Any randomness should be derived from the [`TestCase::Args`] or from
     /// [`Driver::Args`]. You should not use interior mutability inside of `self`.
-    fn init<'a>(&self, args: &mut Self::Args<'a>) -> (impl Driver<'a>, impl AsyncFnMut());
+    fn init<'a>(
+        &self,
+        args: &mut Self::Args<'a>,
+    ) -> (impl Driver<'a>, impl AsyncFnMut(Self::FactoryItem<'a>));
 }
 
 /// A `Driver` is responsible for making a leaf future make progress.
@@ -235,19 +239,23 @@ where
 
 #[macro_export]
 macro_rules! testcase {
-    (|$args:ident: &mut $arg_ty:ty| $body:expr) => {{
+    (|$args:ident: &mut $arg_ty:ty| -> $item_ty:ty $body:block) => {{
         struct TestCase;
         impl $crate::TestCase for TestCase {
             type Args<'a> = $arg_ty;
+            type FactoryItem<'a> = $item_ty;
             fn init<'a>(
                 &self,
                 $args: &mut $arg_ty,
-            ) -> (impl $crate::Driver<'a>, impl AsyncFnMut()) {
+            ) -> (impl $crate::Driver<'a>, impl AsyncFnMut($item_ty)) {
                 $body
             }
         }
         TestCase
     }};
+    (|$args:ident: &mut $arg_ty:ty| $body:expr) => {
+        testcase!(|$args: &mut $arg_ty| -> () { $body })
+    };
 }
 
 struct TestWaker {
@@ -281,9 +289,7 @@ impl futures_util::task::ArcWake for TestWaker {
 ///         }
 ///     });
 ///
-///     // Factory creates futures that receive from the channel.
-///     // This is cancellation-safe - the channel persists across cancellations.
-///     let factory = async move || {
+///     let factory = async move |_: ()| {
 ///         let _ = rx.next().await;
 ///     };
 ///
@@ -311,7 +317,7 @@ fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<(
     let mut driver_done = false;
 
     while completions < completions_needed && !driver_done {
-        let mut future = pin!(factory());
+        let mut future = pin!(factory(u.arbitrary()?));
 
         loop {
             match u.arbitrary()? {

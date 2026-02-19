@@ -16,7 +16,7 @@ fn oneshot() {
         });
 
         let mut rx = Some(rx);
-        let factory = async move || {
+        let factory = async move |_: ()| {
             if let Some(inner_rx) = rx.as_mut() {
                 let _ = inner_rx.await;
                 rx = None;

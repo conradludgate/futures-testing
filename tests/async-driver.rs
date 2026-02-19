@@ -13,7 +13,7 @@ fn async_driver() {
             Err(_) => ControlFlow::Break(()),
         });
 
-        let factory = async move || {
+        let factory = async move |_: ()| {
             let _ = rx.next().await;
         };
 

@@ -13,7 +13,7 @@ fn oneshot() {
             std::task::Poll::Ready(ControlFlow::Continue(()))
         });
 
-        let future = async move || {
+        let future = async move |_: ()| {
             let mut i = 0;
             sink.wait_until(|| {
                 if i < 1 {

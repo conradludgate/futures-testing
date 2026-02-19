@@ -27,7 +27,7 @@ fn oneshot_cancel_unsafe() {
         });
 
         let mut rx = Some(rx);
-        let factory = async move || {
+        let factory = async move |_: ()| {
             if let Some(rx) = rx.take() {
                 let _ = rx.await;
             }

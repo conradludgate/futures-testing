@@ -11,7 +11,7 @@ fn mpsc() {
             Ok(()) => std::task::Poll::Ready(ControlFlow::Continue(())),
             Err(_) => std::task::Poll::Pending,
         });
-        let factory = async move || {
+        let factory = async move |_: ()| {
             let _ = rx.next().await;
         };
 

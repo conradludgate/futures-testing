@@ -1,4 +1,4 @@
-use futures_testing::{drive_fn, testcase, Driver};
+use futures_testing::{drive_poll_fn, testcase};
 use std::ops::ControlFlow;
 
 #[test]
@@ -7,7 +7,7 @@ fn oneshot() {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let mut tx = Some(tx);
-        let driver = drive_fn(move |()| {
+        let driver = drive_poll_fn(move |()| {
             if let Some(tx) = tx.take() {
                 let _ = tx.send(());
                 return std::task::Poll::Ready(ControlFlow::Break(()));

@@ -9,14 +9,14 @@
 //!
 //! ```
 //! use std::ops::ControlFlow;
-//! use futures_testing::{drive_fn, Driver, testcase};
+//! use futures_testing::{drive_poll_fn, testcase};
 //! use futures::StreamExt;
 //!
 //! let testcase = testcase!(|_args: &mut ()| {
 //!     let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 //!
 //!     // Define the driver - sends items to the channel.
-//!     let driver = drive_fn(move |item: u8| {
+//!     let driver = drive_poll_fn(move |item: u8| {
 //!         match tx.try_send(item) {
 //!             Ok(()) => std::task::Poll::Ready(ControlFlow::Continue(())),
 //!             Err(_) => std::task::Poll::Pending,
@@ -92,26 +92,31 @@ pub trait Driver<'a> {
 }
 
 pin_project_lite::pin_project!(
-    /// See [`drive_fn`]
-    pub struct FnDriver<F, A> {
+    /// See [`drive_poll_fn`]
+    pub struct PollFnDriver<F, A> {
         f: F,
         _arg: PhantomData<A>,
     }
 );
 
-/// A convenient method for constructing a [`Driver`] from a [`FnMut`]
-pub fn drive_fn<A, F>(f: F) -> FnDriver<F, A>
+/// A convenient method for constructing a [`Driver`] from a poll-style [`FnMut`].
+///
+/// The function receives an arbitrary argument and returns `Poll<ControlFlow<()>>`:
+/// - `Poll::Ready(ControlFlow::Continue(()))` - progress made
+/// - `Poll::Ready(ControlFlow::Break(()))` - driver is done
+/// - `Poll::Pending` - no progress
+pub fn drive_poll_fn<A, F>(f: F) -> PollFnDriver<F, A>
 where
     A: for<'a> Arbitrary<'a>,
     F: FnMut(A) -> Poll<ControlFlow<()>>,
 {
-    FnDriver {
+    PollFnDriver {
         f,
         _arg: PhantomData,
     }
 }
 
-impl<'a, A, F> Driver<'a> for FnDriver<F, A>
+impl<'a, A, F> Driver<'a> for PollFnDriver<F, A>
 where
     A: Arbitrary<'a>,
     F: FnMut(A) -> Poll<ControlFlow<()>>,
@@ -121,6 +126,48 @@ where
         args: &mut Unstructured<'a>,
     ) -> arbitrary::Result<Poll<ControlFlow<()>>> {
         Ok((self.project().f)(args.arbitrary()?))
+    }
+}
+
+/// See [`drive_fn`]
+pub struct AsyncFnDriver<F, A> {
+    f: F,
+    _arg: PhantomData<fn(A)>,
+}
+
+/// A convenient method for constructing a [`Driver`] from an [`AsyncFnMut`].
+///
+/// The async function receives an arbitrary argument and returns `ControlFlow<()>`:
+/// - `ControlFlow::Continue(())` - progress made, future should be polled
+/// - `ControlFlow::Break(())` - driver is done
+pub fn drive_fn<A, F>(f: F) -> AsyncFnDriver<F, A>
+where
+    A: for<'a> Arbitrary<'a>,
+    F: AsyncFnMut(A) -> ControlFlow<()>,
+{
+    AsyncFnDriver {
+        f,
+        _arg: PhantomData,
+    }
+}
+
+impl<'a, A, F> Driver<'a> for AsyncFnDriver<F, A>
+where
+    A: Arbitrary<'a>,
+    F: AsyncFnMut(A) -> ControlFlow<()> + Unpin,
+{
+    fn poll(
+        self: Pin<&mut Self>,
+        args: &mut Unstructured<'a>,
+    ) -> arbitrary::Result<Poll<ControlFlow<()>>> {
+        let this = self.get_mut();
+        let cx = &mut Context::from_waker(Waker::noop());
+        let arg: A = args.arbitrary()?;
+        let mut fut = pin!((this.f)(arg));
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(cf) => Ok(Poll::Ready(cf)),
+            Poll::Pending => Ok(Poll::Pending),
+        }
     }
 }
 
@@ -192,7 +239,10 @@ macro_rules! testcase {
         struct TestCase;
         impl $crate::TestCase for TestCase {
             type Args<'a> = $arg_ty;
-            fn init<'a>(&self, $args: &mut $arg_ty) -> (impl Driver<'a>, impl AsyncFnMut()) {
+            fn init<'a>(
+                &self,
+                $args: &mut $arg_ty,
+            ) -> (impl $crate::Driver<'a>, impl AsyncFnMut()) {
                 $body
             }
         }
@@ -217,14 +267,14 @@ impl futures_util::task::ArcWake for TestWaker {
 ///
 /// ```
 /// use std::ops::ControlFlow;
-/// use futures_testing::{drive_fn, Driver, testcase};
+/// use futures_testing::{drive_poll_fn, testcase};
 /// use futures::StreamExt;
 ///
 /// let testcase = testcase!(|_args: &mut ()| {
 ///     let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 ///
 ///     // Define the driver - sends items to the channel.
-///     let driver = drive_fn(move |item: u8| {
+///     let driver = drive_poll_fn(move |item: u8| {
 ///         match tx.try_send(item) {
 ///             Ok(()) => std::task::Poll::Ready(ControlFlow::Continue(())),
 ///             Err(_) => std::task::Poll::Pending,

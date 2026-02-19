@@ -10,6 +10,13 @@ use futures_util::task::waker_ref;
 
 use crate::{Driver, TestCase};
 
+macro_rules! trace {
+    ($($tt:tt)*) => {
+        #[cfg(feature = "tracing")]
+        tracing::trace!($($tt)*)
+    };
+}
+
 struct TestWaker {
     woken: AtomicBool,
 }
@@ -32,6 +39,11 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
     let mut driver_done = false;
 
     while completions < completions_needed && !driver_done {
+        #[cfg(feature = "tracing")]
+        let _span =
+            tracing::trace_span!("iteration", iteration = completions + 1, completions_needed)
+                .entered();
+
         let mut future = pin!(factory(u.arbitrary()?));
         let mut v: u8 = u.arbitrary()?;
 
@@ -49,30 +61,36 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
                     if !waker.woken.swap(false, Ordering::SeqCst) {
                         continue;
                     }
+                    trace!("change_waker");
                     waker = Arc::new(TestWaker {
                         woken: AtomicBool::new(true),
                     });
                 }
-                Choice::SpuriousPoll => {
-                    waker.woken.store(false, Ordering::SeqCst);
-                    if poll_fut(&mut waker, future.as_mut()).is_ready() {
-                        completions += 1;
-                        waker.woken.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-                Choice::Poll => {
-                    if !waker.woken.swap(false, Ordering::SeqCst) {
+                Choice::Poll { spurious } => {
+                    let was_woken = waker.woken.swap(false, Ordering::SeqCst);
+                    if !(was_woken || spurious) {
                         continue;
                     }
-                    if poll_fut(&mut waker, future.as_mut()).is_ready() {
+                    let poll = poll_fut(&mut waker, future.as_mut());
+                    trace!(
+                        spurious = spurious & !was_woken,
+                        ready = poll.is_ready(),
+                        "poll"
+                    );
+                    if poll.is_ready() {
                         completions += 1;
                         waker.woken.store(true, Ordering::SeqCst);
                         break;
                     }
                 }
                 Choice::Drive => {
-                    if let Poll::Ready(cf) = driver.as_mut().poll(u)? {
+                    let poll = driver.as_mut().poll(u)?;
+                    trace!(
+                        ready = poll.is_ready(),
+                        done = matches!(poll, Poll::Ready(cf) if cf.is_break()),
+                        "drive"
+                    );
+                    if let Poll::Ready(cf) = poll {
                         let woken = waker.woken.load(Ordering::SeqCst);
                         assert!(woken, "future was not woken when driver made progress");
                         if cf.is_break() {
@@ -80,7 +98,10 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
                         }
                     }
                 }
-                Choice::Cancel => break,
+                Choice::Cancel => {
+                    trace!("cancel");
+                    break;
+                }
             }
 
             v = u.arbitrary()?;
@@ -110,8 +131,7 @@ fn poll_fut(waker: &mut Arc<TestWaker>, f: Pin<&mut impl Future>) -> Poll<()> {
 
 enum Choice {
     ChangeWaker,
-    SpuriousPoll,
-    Poll,
+    Poll { spurious: bool },
     Drive,
     Cancel,
 }
@@ -120,9 +140,9 @@ impl From<u8> for Choice {
     fn from(value: u8) -> Self {
         match value {
             0 => Choice::ChangeWaker,
-            1 => Choice::SpuriousPoll,
+            1 => Choice::Poll { spurious: true },
             2 => Choice::Cancel,
-            3..=129 => Choice::Poll,
+            3..=129 => Choice::Poll { spurious: false },
             130..=255 => Choice::Drive,
         }
     }

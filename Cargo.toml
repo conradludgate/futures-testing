@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 arbitrary = "1"
 arbtest = "0.3"
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 pin-project-lite = "0.2"
 
 [dev-dependencies]

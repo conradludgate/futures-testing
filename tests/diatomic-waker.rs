@@ -1,5 +1,5 @@
 use diatomic_waker::DiatomicWaker;
-use futures_testing::{drive_poll_fn, testcase, ArbitraryDefault};
+use futures_testing::{ArbitraryDefault, drive_poll_fn, testcase};
 use std::ops::ControlFlow;
 
 #[test]

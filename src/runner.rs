@@ -29,7 +29,7 @@ impl futures_util::task::ArcWake for TestWaker {
 
 pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let mut args = u.arbitrary()?;
-    let completions_needed = u.int_in_range(1..=4)?;
+    let completions_needed = u.int_in_range(1..=8)?;
     let (driver, mut factory) = t.init(&mut args);
     let mut driver = pin!(driver);
     let mut waker = Arc::new(TestWaker {

@@ -73,8 +73,8 @@ mod runner;
 
 pub use arbitrary;
 use arbitrary::{Arbitrary, Unstructured};
-use arbtest::{arbtest, ArbTest};
-pub use driver::{drive_fn, drive_poll_fn, drive_sink, AsyncFnDriver, PollFnDriver, SinkDriver};
+use arbtest::{ArbTest, arbtest};
+pub use driver::{AsyncFnDriver, PollFnDriver, SinkDriver, drive_fn, drive_poll_fn, drive_sink};
 
 /// Defines a future to test for waker correctness, along with the [`Driver`] that
 /// makes it progress.

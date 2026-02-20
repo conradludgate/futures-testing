@@ -1,39 +1,33 @@
-use futures_testing::{drive_poll_fn, testcase, ArbitraryDefault};
+use futures_testing::{ArbitraryDefault, drive_poll_fn, testcase};
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Poll, Waker};
 
-/// This test demonstrates a cancel-unsafe pattern: consuming the sender before
-/// the receiver completes. If cancelled after send but before receive, the
-/// receiver is dropped and subsequent retries fail.
+/// This test demonstrates a cancel-unsafe pattern: taking the receiver out of
+/// an Option, consuming it, then putting it back. If the future is cancelled
+/// mid-await, the receiver is dropped and subsequent calls panic.
 ///
 /// The failure occurs because:
-/// 1. Future starts, takes rx from Option, begins awaiting
-/// 2. Cancel happens - future dropped, rx dropped with it
-/// 3. New future created - rx.take() returns None, future does nothing
-/// 4. Driver runs, sends to dropped receiver, returns Break
-/// 5. Assertion fails: "future was not woken when driver made progress"
+/// 1. Future takes rx from Option, begins awaiting recv()
+/// 2. Cancel happens -- future dropped, rx dropped with it
+/// 3. New future created -- rx.take() returns None, unwrap panics
 #[test]
-#[should_panic(expected = "future was not woken when driver made progress")]
-fn oneshot_cancel_unsafe() {
+#[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
+fn mpsc_cancel_unsafe() {
     futures_testing::tests(testcase!(|| {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        let mut tx = Some(tx);
-        let driver = drive_poll_fn(move |()| {
-            if let Some(tx) = tx.take() {
-                let _ = tx.send(());
-                return std::task::Poll::Ready(ControlFlow::Break(()));
-            }
-            std::task::Poll::Pending
+        let driver = drive_poll_fn(move |()| match tx.try_send(()) {
+            Ok(()) => Poll::Ready(ControlFlow::Continue(())),
+            Err(_) => Poll::Pending,
         });
 
         let mut rx = Some(rx);
         let factory = async move |_: ()| {
-            if let Some(rx) = rx.take() {
-                let _ = rx.await;
-            }
+            let mut inner = rx.take().unwrap();
+            let _ = inner.recv().await;
+            rx = Some(inner);
         };
 
         (driver, factory)
@@ -88,8 +82,8 @@ fn spurious_poll() {
         AtomicUsize,
         Mutex<Option<Waker>>
     )>| {
-        let counter = &args.0 .0;
-        let waker_store = &args.0 .1;
+        let counter = &args.0.0;
+        let waker_store = &args.0.1;
 
         let driver = drive_poll_fn(move |()| {
             if let Some(w) = waker_store.lock().unwrap().take() {

@@ -138,7 +138,7 @@ checksum = "f90f7dce0722e95104fcb095585910c0977252f286e354b5e3bd38902cd99988"
 
 [[package]]
 name = "futures-testing"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arbitrary",
  "arbtest",

@@ -32,7 +32,7 @@ fn mpsc_cancel_unsafe() {
 
         (driver, factory)
     }))
-    .seed(0xa864491700000001)
+    .seed(0x112e7ee800000001)
     .run();
 }
 
@@ -111,7 +111,7 @@ fn spurious_poll() {
 
         (driver, factory)
     }))
-    .seed(0x82b7a72500000000)
+    .seed(0x94f262b900000001)
     .run();
 }
 
@@ -157,6 +157,6 @@ fn stale_waker() {
 
         (driver, factory)
     }))
-    .seed(0x1cc3a7f600000001)
+    .seed(0x215f81a900000005)
     .run();
 }

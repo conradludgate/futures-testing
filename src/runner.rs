@@ -5,7 +5,7 @@ use core::sync::atomic::AtomicBool;
 use core::task::Context;
 use std::{pin::Pin, sync::atomic::Ordering, task::Poll};
 
-use arbitrary::Unstructured;
+use arbitrary::{Arbitrary, Unstructured};
 use futures_util::task::waker_ref;
 
 use crate::{Driver, TestCase};
@@ -45,18 +45,10 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
                 .entered();
 
         let mut future = pin!(factory(u.arbitrary()?));
-        let mut v: u8 = u.arbitrary()?;
-
-        let mut noop_count: u8 = 0;
+        let mut v: ChoiceState = u.arbitrary()?;
 
         loop {
-            noop_count = noop_count.wrapping_add(1);
-            if noop_count == 0 {
-                return Err(arbitrary::Error::NotEnoughData);
-            }
-            v = v.wrapping_mul(113).wrapping_add(1);
-
-            match Choice::from(v) {
+            match v.next()? {
                 Choice::ChangeWaker => {
                     if !waker.woken.swap(false, Ordering::SeqCst) {
                         continue;
@@ -105,7 +97,6 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
             }
 
             v = u.arbitrary()?;
-            noop_count = 0;
         }
     }
 
@@ -129,6 +120,7 @@ fn poll_fut(waker: &mut Arc<TestWaker>, f: Pin<&mut impl Future>) -> Poll<()> {
     Poll::Pending
 }
 
+#[derive(PartialEq, Debug)]
 enum Choice {
     ChangeWaker,
     Poll { spurious: bool },
@@ -145,5 +137,54 @@ impl From<u8> for Choice {
             3..=129 => Choice::Poll { spurious: false },
             130..=255 => Choice::Drive,
         }
+    }
+}
+
+struct ChoiceState {
+    value: u8,
+    count: u8,
+}
+
+impl ChoiceState {
+    pub fn next(&mut self) -> arbitrary::Result<Choice> {
+        self.count = self.count.wrapping_add(1);
+        if self.count == 0 {
+            return Err(arbitrary::Error::IncorrectFormat);
+        }
+        self.value = self.value.wrapping_mul(113).wrapping_add(1);
+        Ok(Choice::from(self.value))
+    }
+}
+
+impl<'a> Arbitrary<'a> for ChoiceState {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let value = u.bytes(1)?[0];
+        Ok(ChoiceState { value, count: 0 })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{drive_poll_fn, testcase};
+
+    #[test]
+    fn exhausted_buffer_returns_error_instead_of_livelock() {
+        let mut t = testcase!(|| {
+            let driver = drive_poll_fn(|()| Poll::Pending);
+            let factory = async move |_: ()| {};
+            (driver, factory)
+        });
+
+        // Completely empty buffer
+        let mut u = Unstructured::new(&[]);
+        let result = test(&mut t, &mut u);
+        assert!(matches!(result, Err(arbitrary::Error::NotEnoughData)));
+
+        // Buffer that gets exhausted exactly inside the inner loop
+        let data = [1, 0];
+        let mut u = Unstructured::new(&data);
+        let result = test(&mut t, &mut u);
+        assert!(matches!(result, Err(arbitrary::Error::NotEnoughData)));
     }
 }

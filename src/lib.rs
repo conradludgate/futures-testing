@@ -223,3 +223,13 @@ impl<'a, A: Default> arbitrary::Arbitrary<'a> for ArbitraryDefault<A> {
         (0, Some(0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arbitrary_default_size_hint() {
+        assert_eq!(ArbitraryDefault::<()>::size_hint(0), (0, Some(0)));
+    }
+}

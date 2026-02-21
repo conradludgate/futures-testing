@@ -187,4 +187,16 @@ mod tests {
         let result = test(&mut t, &mut u);
         assert!(matches!(result, Err(arbitrary::Error::NotEnoughData)));
     }
+
+    #[test]
+    fn choice_state_next_exhaustion() {
+        let mut choice = ChoiceState { value: 0, count: 0 };
+        for _ in 0..255 {
+            assert!(choice.next().is_ok());
+        }
+        assert!(matches!(
+            choice.next(),
+            Err(arbitrary::Error::IncorrectFormat)
+        ));
+    }
 }

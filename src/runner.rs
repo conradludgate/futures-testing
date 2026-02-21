@@ -199,4 +199,47 @@ mod tests {
             Err(arbitrary::Error::IncorrectFormat)
         ));
     }
+
+    #[test]
+    fn test_runner_completion_count() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct MyTestCase {
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl crate::TestCase for MyTestCase {
+            type Args<'a> = ();
+            type FactoryItem<'a> = ();
+
+            fn init<'a>(
+                &self,
+                _args: &mut Self::Args<'a>,
+            ) -> (impl crate::Driver<'a>, impl core::ops::AsyncFnMut(Self::FactoryItem<'a>)) {
+                let driver = crate::drive_poll_fn(|()| Poll::Pending);
+                let counter = self.counter.clone();
+                let factory = move |_: ()| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    core::future::ready(())
+                };
+                (driver, factory)
+            }
+        }
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut t = MyTestCase {
+            counter: counter.clone(),
+        };
+
+        // 1st byte: 2 -> completions_needed = 3 (since 2 % 8 = 2, 1 + 2 = 3)
+        // 2nd byte: 50 -> ChoiceState, next value = 50*113+1 = 19 -> Choice::Poll (spurious: false)
+        // 3rd byte: 50 -> ChoiceState
+        // 4th byte: 50 -> ChoiceState
+        let data = [2, 50, 50, 50];
+        let mut u = Unstructured::new(&data);
+
+        test(&mut t, &mut u).unwrap();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
 }

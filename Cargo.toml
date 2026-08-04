@@ -2,6 +2,7 @@
 name = "futures-testing"
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.86"
 authors = ["Conrad Ludgate <conradludgate@gmail.com>"]
 license = "Apache-2.0"
 description = "Property-based testing framework for futures, fuzzing poll ordering to catch waker bugs"
@@ -15,7 +16,7 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 arbitrary = "1"
-arbtest = "0.3"
+hegeltest = "0.28.4"
 futures-util = { version = "0.3", features = ["sink"] }
 pin-project-lite = "0.2"
 tracing = { version = "0.1", optional = true }

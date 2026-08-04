@@ -1,4 +1,4 @@
-use futures_testing::{ArbitraryDefault, drive_poll_fn, testcase};
+use futures_testing::{ArbitraryDefault, drive_poll_fn_with, generators as gs, testcase};
 use std::ops::ControlFlow;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -18,7 +18,7 @@ fn mpsc_cancel_unsafe() {
     futures_testing::tests(testcase!(|| {
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        let driver = drive_poll_fn(move |()| match tx.try_send(()) {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| match tx.try_send(()) {
             Ok(()) => Poll::Ready(ControlFlow::Continue(())),
             Err(_) => Poll::Pending,
         });
@@ -32,7 +32,7 @@ fn mpsc_cancel_unsafe() {
 
         (driver, factory)
     }))
-    .seed(0x112e7ee800000001)
+    .reproduce_failure("AXicXcm5DQAwDMNAKumSoT26v8qwGh3AD1xRe33SghVOwkcjACHiAc8=")
     .run();
 }
 
@@ -45,7 +45,7 @@ fn no_waker_registration() {
     futures_testing::tests(testcase!(|args: &mut ArbitraryDefault<AtomicBool>| {
         let ready = &args.0;
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             ready.store(true, Ordering::SeqCst);
             Poll::Ready(ControlFlow::Break(()))
         });
@@ -63,7 +63,7 @@ fn no_waker_registration() {
 
         (driver, factory)
     }))
-    .seed(0xe46e62a900000001)
+    .reproduce_failure("AXicY2VgYGBmZAABLjDFyAhjMAAAAi8AIw==")
     .run();
 }
 
@@ -85,7 +85,7 @@ fn spurious_poll() {
         let counter = &args.0.0;
         let waker_store = &args.0.1;
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             if let Some(w) = waker_store.lock().unwrap().take() {
                 assert_eq!(counter.fetch_add(1, Ordering::SeqCst), 1);
                 w.wake();
@@ -111,7 +111,7 @@ fn spurious_poll() {
 
         (driver, factory)
     }))
-    .seed(0x94f262b900000001)
+    .reproduce_failure("AXicY2dgYGBmZAABLjDFyIjEYALS/xgYGQAISAEx")
     .run();
 }
 
@@ -133,7 +133,7 @@ fn stale_waker() {
     >| {
         let waker_store = &args.0;
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             let guard = waker_store.lock().unwrap();
             if let Some(w) = guard.as_ref() {
                 w.wake_by_ref();
@@ -157,6 +157,6 @@ fn stale_waker() {
 
         (driver, factory)
     }))
-    .seed(0x215f81a900000005)
+    .reproduce_failure("AXicXck5DgAwCAPBddIlj+blSBwVwo1H2g9cUXt90oIVTsJHIwAhyAHN")
     .run();
 }

@@ -34,20 +34,21 @@
 //! - **Factory** -- an async closure called multiple times to produce the futures
 //!   under test. Each call may receive an arbitrary item (see [`TestCase::FactoryItem`]).
 //!
-//! Under the hood the runner uses [`arbtest`] to fuzz the interleaving of these
-//! actions, catching waker bugs that deterministic tests would miss.
+//! Under the hood the runner uses [Hegel](https://hegel.dev) to generate and
+//! shrink the interleaving of these actions, catching waker bugs that
+//! deterministic tests would miss.
 //!
 //! # Example
 //!
 //! ```
 //! use std::ops::ControlFlow;
-//! use futures_testing::{drive_poll_fn, testcase};
+//! use futures_testing::{drive_poll_fn_with, generators as gs, testcase};
 //! use futures::StreamExt;
 //!
 //! let testcase = testcase!(|| {
 //!     let (mut tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 //!
-//!     let driver = drive_poll_fn(move |item: u8| {
+//!     let driver = drive_poll_fn_with(gs::integers::<u8>(), move |item| {
 //!         match tx.try_send(item) {
 //!             Ok(()) => std::task::Poll::Ready(ControlFlow::Continue(())),
 //!             Err(_) => std::task::Poll::Pending,
@@ -73,8 +74,12 @@ mod runner;
 
 pub use arbitrary;
 use arbitrary::{Arbitrary, Unstructured};
-use arbtest::{ArbTest, arbtest};
-pub use driver::{AsyncFnDriver, PollFnDriver, SinkDriver, drive_fn, drive_poll_fn, drive_sink};
+pub use driver::{
+    ArbitraryGenerator, AsyncFnDriver, PollFnDriver, SinkDriver, arbitrary_values, drive_fn,
+    drive_fn_with, drive_poll_fn, drive_poll_fn_with, drive_sink, drive_sink_with,
+};
+pub use hegel::generators;
+pub use hegel::{Backend, HealthCheck, Hegel, Mode, Phase, Settings, Verbosity};
 
 /// Defines a future to test for waker correctness, along with the [`Driver`] that
 /// makes it progress.
@@ -113,14 +118,16 @@ pub trait TestCase {
 /// * if the leaf future is the receiver of a channel, the driver is the sender.
 /// * if the leaf future is a timeout, the driver is the timer system.
 ///
-/// See [`drive_poll_fn`], [`drive_fn`], and [`drive_sink`] for convenient
-/// constructors.
+/// See [`drive_poll_fn_with`], [`drive_fn_with`], and [`drive_sink_with`] for
+/// Hegel-native constructors. The variants without `_with` adapt legacy
+/// [`Arbitrary`] inputs.
 pub trait Driver<'a> {
     /// Drive the leaf future to make progress.
     ///
-    /// **Key invariant:** when this returns `Poll::Ready`, the framework asserts
-    /// that the future's waker was called. Return `Poll::Pending` if no progress
-    /// was made (e.g. the channel is full) to skip that assertion.
+    /// **Key invariant:** when this returns `Poll::Ready` after the current
+    /// future has registered a waker, the framework asserts that the waker was
+    /// called. Return `Poll::Pending` if no progress was made (e.g. the channel
+    /// is full) to skip that assertion.
     ///
     /// - `Poll::Ready(ControlFlow::Continue(()))` -- progress made
     /// - `Poll::Ready(ControlFlow::Break(()))` -- driver is done, exit after
@@ -128,10 +135,7 @@ pub trait Driver<'a> {
     /// - `Poll::Pending` -- no progress
     ///
     /// This function is allowed to block.
-    fn poll(
-        self: Pin<&mut Self>,
-        args: &mut Unstructured<'a>,
-    ) -> arbitrary::Result<Poll<ControlFlow<()>>>;
+    fn poll(self: Pin<&mut Self>, tc: &hegel::TestCase) -> Poll<ControlFlow<()>>;
 }
 
 /// Shorthand for implementing [`TestCase`].
@@ -191,12 +195,19 @@ macro_rules! testcase {
 
 /// Construct the test runner for this [`TestCase`].
 ///
-/// Returns an [`ArbTest`] runner -- see [`arbtest`](mod@arbtest) for
-/// configuration options like `.seed()` and `.budget_ms()`.
-pub fn tests<T: TestCase>(
-    mut t: T,
-) -> ArbTest<impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>> {
-    arbtest(move |u| runner::test(&mut t, u))
+/// Returns a Hegel runner.
+///
+/// Configure it with [`Hegel::settings`]. Failure blobs are printed by default
+/// so a shrunk counterexample can be replayed with [`Hegel::reproduce_failure`].
+/// The default configuration runs 1,000 test cases. Passing custom [`Settings`]
+/// replaces those defaults, including the failure-blob setting.
+pub fn tests<T: TestCase>(mut t: T) -> Hegel<impl FnMut(hegel::TestCase)> {
+    Hegel::new(move |tc| {
+        if runner::test(&mut t, &tc).is_err() {
+            tc.reject();
+        }
+    })
+    .settings(Settings::new().test_cases(1_000).print_blob(true))
 }
 
 /// An [`Arbitrary`] wrapper that constructs `T` via [`Default`].

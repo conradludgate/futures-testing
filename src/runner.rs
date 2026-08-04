@@ -5,8 +5,10 @@ use core::sync::atomic::AtomicBool;
 use core::task::Context;
 use std::{pin::Pin, sync::atomic::Ordering, task::Poll};
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Unstructured;
 use futures_util::task::waker_ref;
+use hegel::TestCase as HegelTestCase;
+use hegel::generators as gs;
 
 use crate::{Driver, TestCase};
 
@@ -27,9 +29,40 @@ impl futures_util::task::ArcWake for TestWaker {
     }
 }
 
-pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+pub(crate) fn test<T: TestCase>(t: &mut T, tc: &HegelTestCase) -> arbitrary::Result<()> {
+    // Keep `arbitrary` as the data-generation compatibility layer for user
+    // supplied Args and FactoryItem values. Scheduling and built-in driver
+    // inputs are separate native Hegel draws, so Hegel can shrink them itself.
+    let data = tc.draw_silent(gs::binary().min_size(1).max_size(65_536));
+    tc.target_labelled(data.len() as f64, "arbitrary data size");
+    let mut u = Unstructured::new(&data);
+    let completions_needed = tc.draw_silent(gs::integers::<u8>().max_value(7));
+    let actions: Vec<Choice> = tc
+        .draw_silent(gs::vecs(gs::integers::<u8>()).max_size(4_096))
+        .into_iter()
+        .map(Choice::from)
+        .collect();
+    tc.target_labelled(actions.len() as f64, "schedule length");
+    tc.note(&format!("arbitrary data bytes = {}", data.len()));
+    tc.note(&format!("completions needed = {completions_needed}"));
+    tc.note(&format!("schedule = {actions:?}"));
+    let mut actions = actions.into_iter();
+
+    run(t, &mut u, tc, completions_needed, || actions.next())
+}
+
+fn run<T, F>(
+    t: &mut T,
+    u: &mut Unstructured<'_>,
+    tc: &HegelTestCase,
+    completions_needed: u8,
+    mut next_choice: F,
+) -> arbitrary::Result<()>
+where
+    T: TestCase,
+    F: FnMut() -> Option<Choice>,
+{
     let mut args = u.arbitrary()?;
-    let completions_needed = u.int_in_range(1..=8)?;
     let (driver, mut factory) = t.init(&mut args);
     let mut driver = pin!(driver);
     let mut waker = Arc::new(TestWaker {
@@ -38,17 +71,19 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
     let mut completions = 0;
     let mut driver_done = false;
 
-    while completions < completions_needed && !driver_done {
+    while completions <= completions_needed && !driver_done {
         #[cfg(feature = "tracing")]
         let _span =
             tracing::trace_span!("iteration", iteration = completions + 1, completions_needed)
                 .entered();
 
         let mut future = pin!(factory(u.arbitrary()?));
-        let mut v: ChoiceState = u.arbitrary()?;
-
+        let mut waker_registered = false;
         loop {
-            match v.next()? {
+            let Some(choice) = next_choice() else {
+                return Ok(());
+            };
+            match choice {
                 Choice::ChangeWaker => {
                     if !waker.woken.swap(false, Ordering::SeqCst) {
                         continue;
@@ -57,6 +92,7 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
                     waker = Arc::new(TestWaker {
                         woken: AtomicBool::new(true),
                     });
+                    waker_registered = false;
                 }
                 Choice::Poll { spurious } => {
                     let was_woken = waker.woken.swap(false, Ordering::SeqCst);
@@ -74,17 +110,20 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
                         waker.woken.store(true, Ordering::SeqCst);
                         break;
                     }
+                    waker_registered = true;
                 }
                 Choice::Drive => {
-                    let poll = driver.as_mut().poll(u)?;
+                    let poll = driver.as_mut().poll(tc);
                     trace!(
                         ready = poll.is_ready(),
                         done = matches!(poll, Poll::Ready(cf) if cf.is_break()),
                         "drive"
                     );
                     if let Poll::Ready(cf) = poll {
-                        let woken = waker.woken.load(Ordering::SeqCst);
-                        assert!(woken, "future was not woken when driver made progress");
+                        if waker_registered {
+                            let woken = waker.woken.load(Ordering::SeqCst);
+                            assert!(woken, "future was not woken when driver made progress");
+                        }
                         if cf.is_break() {
                             driver_done = true;
                         }
@@ -95,8 +134,6 @@ pub(crate) fn test<T: TestCase>(t: &mut T, u: &mut Unstructured<'_>) -> arbitrar
                     break;
                 }
             }
-
-            v = u.arbitrary()?;
         }
     }
 
@@ -131,73 +168,49 @@ enum Choice {
 impl From<u8> for Choice {
     fn from(value: u8) -> Self {
         match value {
-            0 => Choice::ChangeWaker,
-            1 => Choice::Poll { spurious: true },
-            2 => Choice::Cancel,
-            3..=129 => Choice::Poll { spurious: false },
-            130..=255 => Choice::Drive,
+            // Put productive actions first because Hegel shrinks integers
+            // toward zero. The bucket sizes match the old byte encoding.
+            0..=126 => Choice::Poll { spurious: false },
+            127..=252 => Choice::Drive,
+            253 => Choice::ChangeWaker,
+            254 => Choice::Poll { spurious: true },
+            255 => Choice::Cancel,
         }
-    }
-}
-
-struct ChoiceState {
-    value: u8,
-    count: u8,
-}
-
-impl ChoiceState {
-    pub fn next(&mut self) -> arbitrary::Result<Choice> {
-        self.count = self.count.wrapping_add(1);
-        if self.count == 0 {
-            return Err(arbitrary::Error::IncorrectFormat);
-        }
-        self.value = self.value.wrapping_mul(113).wrapping_add(1);
-        Ok(Choice::from(self.value))
-    }
-}
-
-impl<'a> Arbitrary<'a> for ChoiceState {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let value = u.bytes(1)?[0];
-        Ok(ChoiceState { value, count: 0 })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{drive_poll_fn, testcase};
+    use crate::{drive_poll_fn_with, testcase};
 
     #[test]
-    fn exhausted_buffer_returns_error_instead_of_livelock() {
+    fn exhausted_schedule_terminates_instead_of_livelock() {
         let mut t = testcase!(|| {
-            let driver = drive_poll_fn(|()| Poll::Pending);
+            let driver = drive_poll_fn_with(gs::unit(), |()| Poll::Pending);
             let factory = async move |_: ()| {};
             (driver, factory)
         });
 
-        // Completely empty buffer
-        let mut u = Unstructured::new(&[]);
-        let result = test(&mut t, &mut u);
-        assert!(matches!(result, Err(arbitrary::Error::NotEnoughData)));
-
-        // Buffer that gets exhausted exactly inside the inner loop
-        let data = [1, 0];
-        let mut u = Unstructured::new(&data);
-        let result = test(&mut t, &mut u);
-        assert!(matches!(result, Err(arbitrary::Error::NotEnoughData)));
+        // A finite Hegel-generated schedule may end while a future is pending.
+        hegel::Hegel::new(move |tc| {
+            let mut u = Unstructured::new(&[]);
+            let result = run(&mut t, &mut u, &tc, 0, || None);
+            assert!(result.is_ok());
+        })
+        .settings(hegel::Settings::new().test_cases(1).database(None))
+        .run();
     }
 
     #[test]
-    fn choice_state_next_exhaustion() {
-        let mut choice = ChoiceState { value: 0, count: 0 };
-        for _ in 0..255 {
-            assert!(choice.next().is_ok());
-        }
-        assert!(matches!(
-            choice.next(),
-            Err(arbitrary::Error::IncorrectFormat)
-        ));
+    fn choice_mapping_preserves_action_weighting() {
+        assert_eq!(Choice::from(0), Choice::Poll { spurious: false });
+        assert_eq!(Choice::from(126), Choice::Poll { spurious: false });
+        assert_eq!(Choice::from(127), Choice::Drive);
+        assert_eq!(Choice::from(252), Choice::Drive);
+        assert_eq!(Choice::from(253), Choice::ChangeWaker);
+        assert_eq!(Choice::from(254), Choice::Poll { spurious: true });
+        assert_eq!(Choice::from(255), Choice::Cancel);
     }
 
     #[test]
@@ -215,8 +228,11 @@ mod tests {
             fn init<'a>(
                 &self,
                 _args: &mut Self::Args<'a>,
-            ) -> (impl crate::Driver<'a>, impl core::ops::AsyncFnMut(Self::FactoryItem<'a>)) {
-                let driver = crate::drive_poll_fn(|()| Poll::Pending);
+            ) -> (
+                impl crate::Driver<'a>,
+                impl core::ops::AsyncFnMut(Self::FactoryItem<'a>),
+            ) {
+                let driver = crate::drive_poll_fn_with(gs::unit(), |()| Poll::Pending);
                 let counter = self.counter.clone();
                 let factory = move |_: ()| {
                     counter.fetch_add(1, Ordering::SeqCst);
@@ -231,14 +247,15 @@ mod tests {
             counter: counter.clone(),
         };
 
-        // 1st byte: 2 -> completions_needed = 3 (since 2 % 8 = 2, 1 + 2 = 3)
-        // 2nd byte: 50 -> ChoiceState, next value = 50*113+1 = 19 -> Choice::Poll (spurious: false)
-        // 3rd byte: 50 -> ChoiceState
-        // 4th byte: 50 -> ChoiceState
-        let data = [2, 50, 50, 50];
-        let mut u = Unstructured::new(&data);
-
-        test(&mut t, &mut u).unwrap();
+        hegel::Hegel::new(move |tc| {
+            let mut u = Unstructured::new(&[]);
+            run(&mut t, &mut u, &tc, 2, || {
+                Some(Choice::Poll { spurious: false })
+            })
+            .unwrap();
+        })
+        .settings(hegel::Settings::new().test_cases(1).database(None))
+        .run();
 
         assert_eq!(counter.load(Ordering::SeqCst), 3);
     }

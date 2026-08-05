@@ -1,5 +1,5 @@
 use diatomic_waker::DiatomicWaker;
-use futures_testing::{ArbitraryDefault, drive_poll_fn, testcase};
+use futures_testing::{ArbitraryDefault, drive_poll_fn_with, generators as gs, testcase};
 use std::ops::ControlFlow;
 
 #[test]
@@ -8,12 +8,12 @@ fn oneshot() {
         let mut sink = args.0.sink_ref();
         let source = sink.source_ref();
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             source.notify();
             std::task::Poll::Ready(ControlFlow::Continue(()))
         });
 
-        let future = async move |_: ()| {
+        let future = async move |()| {
             let mut i = 0;
             sink.wait_until(|| {
                 if i < 1 {
@@ -23,7 +23,7 @@ fn oneshot() {
                     Some(())
                 }
             })
-            .await
+            .await;
         };
 
         (driver, future)

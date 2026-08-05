@@ -1,4 +1,4 @@
-use futures_testing::{ArbitraryDefault, drive_poll_fn, testcase};
+use futures_testing::{ArbitraryDefault, drive_poll_fn_with, generators as gs, testcase};
 use std::ops::ControlFlow;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,22 +9,22 @@ use std::task::{Poll, Waker};
 /// mid-await, the receiver is dropped and subsequent calls panic.
 ///
 /// The failure occurs because:
-/// 1. Future takes rx from Option, begins awaiting recv()
+/// 1. Future takes rx from `Option`, begins awaiting `recv()`
 /// 2. Cancel happens -- future dropped, rx dropped with it
-/// 3. New future created -- rx.take() returns None, unwrap panics
+/// 3. New future created -- `rx.take()` returns `None`, unwrap panics
 #[test]
 #[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
 fn mpsc_cancel_unsafe() {
     futures_testing::tests(testcase!(|| {
         let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        let driver = drive_poll_fn(move |()| match tx.try_send(()) {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| match tx.try_send(()) {
             Ok(()) => Poll::Ready(ControlFlow::Continue(())),
             Err(_) => Poll::Pending,
         });
 
         let mut rx = Some(rx);
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let mut inner = rx.take().unwrap();
             let _ = inner.recv().await;
             rx = Some(inner);
@@ -32,7 +32,7 @@ fn mpsc_cancel_unsafe() {
 
         (driver, factory)
     }))
-    .seed(0x112e7ee800000001)
+    .reproduce_failure("AXicXYkxDgAABAOVTeLNno5ORIfrJRcyc5DAk6ToSJ0mxls0PIwB1g==")
     .run();
 }
 
@@ -45,12 +45,12 @@ fn no_waker_registration() {
     futures_testing::tests(testcase!(|args: &mut ArbitraryDefault<AtomicBool>| {
         let ready = &args.0;
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             ready.store(true, Ordering::SeqCst);
             Poll::Ready(ControlFlow::Break(()))
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             std::future::poll_fn(|_cx| {
                 if ready.load(Ordering::SeqCst) {
                     Poll::Ready(())
@@ -58,12 +58,12 @@ fn no_waker_registration() {
                     Poll::Pending
                 }
             })
-            .await
+            .await;
         };
 
         (driver, factory)
     }))
-    .seed(0xe46e62a900000001)
+    .reproduce_failure("AXicY2MAAi5GEMnICGMwMIMoMAEAAy8AJg==")
     .run();
 }
 
@@ -85,7 +85,7 @@ fn spurious_poll() {
         let counter = &args.0.0;
         let waker_store = &args.0.1;
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             if let Some(w) = waker_store.lock().unwrap().take() {
                 assert_eq!(counter.fetch_add(1, Ordering::SeqCst), 1);
                 w.wake();
@@ -93,7 +93,7 @@ fn spurious_poll() {
             Poll::Ready(ControlFlow::Continue(()))
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             counter.store(0, Ordering::SeqCst);
             std::future::poll_fn(|cx| match counter.fetch_add(1, Ordering::SeqCst) {
                 0 => {
@@ -106,25 +106,25 @@ fn spurious_poll() {
                     n + 1
                 ),
             })
-            .await
+            .await;
         };
 
         (driver, factory)
     }))
-    .seed(0x94f262b900000001)
+    .reproduce_failure("AXic42AAAi5GEMnIiMRgAtL/GBgZmEECYAIAE6oBNA==")
     .run();
 }
 
 /// This test demonstrates a future that stores the waker once but never
 /// updates it. The driver wakes the future (setting woken=true), which
-/// allows ChangeWaker to fire. After ChangeWaker, the framework polls
+/// allows `ChangeWaker` to fire. After `ChangeWaker`, the framework polls
 /// with a new waker, but the future ignores it.
 ///
 /// 1. Poll with waker1 -- future stores waker1
 /// 2. Drive -- driver wakes future via stored waker, woken=true
-/// 3. ChangeWaker (woken=true) -- framework creates waker2
+/// 3. `ChangeWaker` (woken=true) -- framework creates waker2
 /// 4. Poll with waker2 -- future skips storing waker2 (already has waker1)
-/// 5. poll_fut: waker2 refcount is 1, woken is false -- panic
+/// 5. `poll_fut`: waker2 refcount is 1, woken is false -- panic
 #[test]
 #[should_panic(expected = "Waker passed to future was lost without being woken")]
 fn stale_waker() {
@@ -133,7 +133,7 @@ fn stale_waker() {
     >| {
         let waker_store = &args.0;
 
-        let driver = drive_poll_fn(move |()| {
+        let driver = drive_poll_fn_with(gs::unit(), move |()| {
             let guard = waker_store.lock().unwrap();
             if let Some(w) = guard.as_ref() {
                 w.wake_by_ref();
@@ -143,20 +143,20 @@ fn stale_waker() {
             }
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let mut stored_waker: Option<Waker> = None;
             std::future::poll_fn(|cx| {
                 if stored_waker.is_none() {
                     stored_waker = Some(cx.waker().clone());
                     *waker_store.lock().unwrap() = Some(cx.waker().clone());
                 }
-                Poll::Pending
+                Poll::<()>::Pending
             })
-            .await
+            .await;
         };
 
         (driver, factory)
     }))
-    .seed(0x215f81a900000005)
+    .reproduce_failure("AXicXYkxDgAABAOVTfzZyyXUJDpcL7mQmYMEniRFR+o0Md6iATL0AdA=")
     .run();
 }

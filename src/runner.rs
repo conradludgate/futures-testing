@@ -30,9 +30,7 @@ impl futures_util::task::ArcWake for TestWaker {
 
 pub(crate) fn test<T: TestCase>(t: &T, tc: &HegelTestCase) {
     let completions_needed = tc.draw_silent(gs::integers::<u8>().max_value(7));
-    // Like `TestCase::repeat`, leave collection sizing to Hegel. Generating
-    // commands directly also lets Hegel shrink the schedule structure and
-    // each command together.
+    // Let Hegel size and shrink the command collection.
     let actions = tc.draw_silent(gs::vecs(gs::integers::<u8>().map(Choice::from)));
     let schedule_length = u32::try_from(actions.len()).unwrap_or(u32::MAX);
     tc.target_labelled(f64::from(schedule_length), "schedule length");
@@ -72,8 +70,7 @@ where
                 break 'schedule;
             };
             step += 1;
-            // `repeat` emits a note before running each iteration. Do the same
-            // for schedule commands so a failure is anchored to its cause.
+            // Keep the triggering command visible in replay output.
             tc.note(&format!("// Schedule step #{step}: {choice:?}"));
             match choice {
                 Choice::ChangeWaker => {

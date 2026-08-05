@@ -42,7 +42,7 @@ fn mpsc_receiver_handles_wakers_correctly() {
             Err(_) => std::task::Poll::Pending,
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let _ = rx.next().await;
         };
 

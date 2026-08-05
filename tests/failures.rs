@@ -9,9 +9,9 @@ use std::task::{Poll, Waker};
 /// mid-await, the receiver is dropped and subsequent calls panic.
 ///
 /// The failure occurs because:
-/// 1. Future takes rx from Option, begins awaiting recv()
+/// 1. Future takes rx from `Option`, begins awaiting `recv()`
 /// 2. Cancel happens -- future dropped, rx dropped with it
-/// 3. New future created -- rx.take() returns None, unwrap panics
+/// 3. New future created -- `rx.take()` returns `None`, unwrap panics
 #[test]
 #[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
 fn mpsc_cancel_unsafe() {
@@ -24,7 +24,7 @@ fn mpsc_cancel_unsafe() {
         });
 
         let mut rx = Some(rx);
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let mut inner = rx.take().unwrap();
             let _ = inner.recv().await;
             rx = Some(inner);
@@ -32,7 +32,7 @@ fn mpsc_cancel_unsafe() {
 
         (driver, factory)
     }))
-    .reproduce_failure("AXicXcm5DQAwDMNAKumSoT26v8qwGh3AD1xRe33SghVOwkcjACHiAc8=")
+    .reproduce_failure("AXicXYkxDgAABAOVTeLNno5ORIfrJRcyc5DAk6ToSJ0mxls0PIwB1g==")
     .run();
 }
 
@@ -50,7 +50,7 @@ fn no_waker_registration() {
             Poll::Ready(ControlFlow::Break(()))
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             std::future::poll_fn(|_cx| {
                 if ready.load(Ordering::SeqCst) {
                     Poll::Ready(())
@@ -58,12 +58,12 @@ fn no_waker_registration() {
                     Poll::Pending
                 }
             })
-            .await
+            .await;
         };
 
         (driver, factory)
     }))
-    .reproduce_failure("AXicY2VgYGBmZAABLjDFyAhjMAAAAi8AIw==")
+    .reproduce_failure("AXicY2MAAi5GEMnICGMwMIMoMAEAAy8AJg==")
     .run();
 }
 
@@ -93,7 +93,7 @@ fn spurious_poll() {
             Poll::Ready(ControlFlow::Continue(()))
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             counter.store(0, Ordering::SeqCst);
             std::future::poll_fn(|cx| match counter.fetch_add(1, Ordering::SeqCst) {
                 0 => {
@@ -106,25 +106,25 @@ fn spurious_poll() {
                     n + 1
                 ),
             })
-            .await
+            .await;
         };
 
         (driver, factory)
     }))
-    .reproduce_failure("AXicY2dgYGBmZAABLjDFyIjEYALS/xgYGQAISAEx")
+    .reproduce_failure("AXic42AAAi5GEMnIiMRgAtL/GBgZmEECYAIAE6oBNA==")
     .run();
 }
 
 /// This test demonstrates a future that stores the waker once but never
 /// updates it. The driver wakes the future (setting woken=true), which
-/// allows ChangeWaker to fire. After ChangeWaker, the framework polls
+/// allows `ChangeWaker` to fire. After `ChangeWaker`, the framework polls
 /// with a new waker, but the future ignores it.
 ///
 /// 1. Poll with waker1 -- future stores waker1
 /// 2. Drive -- driver wakes future via stored waker, woken=true
-/// 3. ChangeWaker (woken=true) -- framework creates waker2
+/// 3. `ChangeWaker` (woken=true) -- framework creates waker2
 /// 4. Poll with waker2 -- future skips storing waker2 (already has waker1)
-/// 5. poll_fut: waker2 refcount is 1, woken is false -- panic
+/// 5. `poll_fut`: waker2 refcount is 1, woken is false -- panic
 #[test]
 #[should_panic(expected = "Waker passed to future was lost without being woken")]
 fn stale_waker() {
@@ -143,20 +143,20 @@ fn stale_waker() {
             }
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let mut stored_waker: Option<Waker> = None;
             std::future::poll_fn(|cx| {
                 if stored_waker.is_none() {
                     stored_waker = Some(cx.waker().clone());
                     *waker_store.lock().unwrap() = Some(cx.waker().clone());
                 }
-                Poll::Pending
+                Poll::<()>::Pending
             })
-            .await
+            .await;
         };
 
         (driver, factory)
     }))
-    .reproduce_failure("AXicXck5DgAwCAPBddIlj+blSBwVwo1H2g9cUXt90oIVTsJHIwAhyAHN")
+    .reproduce_failure("AXicXYkxDgAABAOVTfzZyyXUJDpcL7mQmYMEniRFR+o0Md6iATL0AdA=")
     .run();
 }

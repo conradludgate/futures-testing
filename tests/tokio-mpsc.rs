@@ -13,7 +13,7 @@ fn mpsc_rx() {
             }
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let _ = rx.recv().await;
         };
 
@@ -27,7 +27,7 @@ fn mpsc_tx() {
     futures_testing::tests(testcase!(|| -> u8 {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(4);
 
-        let driver = drive_fn_with(gs::unit(), async move |_: ()| match rx.recv().await {
+        let driver = drive_fn_with(gs::unit(), async move |()| match rx.recv().await {
             Some(_) => ControlFlow::Continue(()),
             None => ControlFlow::Break(()),
         });

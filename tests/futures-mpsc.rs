@@ -7,7 +7,7 @@ fn mpsc() {
         let (tx, mut rx) = futures::channel::mpsc::channel::<u8>(4);
 
         let driver = drive_sink_with(tx, gs::integers::<u8>());
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let _ = rx.next().await;
         };
 

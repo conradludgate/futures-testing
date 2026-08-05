@@ -15,7 +15,7 @@ fn async_driver() {
             }
         });
 
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             let _ = rx.next().await;
         };
 

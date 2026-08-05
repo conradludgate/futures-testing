@@ -8,7 +8,7 @@ fn test_sink_close() {
 
         let driver = drive_sink_with(tx, gs::integers::<u8>());
         // This future will only complete when the sink is closed (causing rx to yield None)
-        let factory = async move |_: ()| {
+        let factory = async move |()| {
             while rx.next().await.is_some() {}
         };
 

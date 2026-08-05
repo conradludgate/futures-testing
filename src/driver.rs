@@ -2,6 +2,7 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::ops::{AsyncFnMut, ControlFlow};
 use core::pin::pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Context;
 use std::{pin::Pin, task::Poll, task::Waker};
 
@@ -16,17 +17,35 @@ use crate::Driver;
 ///
 /// Prefer a native Hegel generator when one exists. This adapter preserves
 /// compatibility for types which only implement `Arbitrary`, but Hegel sees
-/// their value as an opaque byte sequence while shrinking.
+/// their value as an opaque byte sequence while shrinking. It uses
+/// [`Arbitrary::arbitrary_take_rest`], rejects data-dependent construction
+/// errors, and targets the first valid draw toward a smaller byte buffer.
 pub struct ArbitraryGenerator<A> {
+    target_label: &'static str,
+    target_pending: AtomicBool,
     _arg: PhantomData<fn(A)>,
 }
 
 /// Construct a Hegel generator backed by [`Arbitrary`].
+#[must_use]
 pub fn arbitrary_values<A>() -> ArbitraryGenerator<A>
 where
     A: for<'a> Arbitrary<'a>,
 {
-    ArbitraryGenerator { _arg: PhantomData }
+    arbitrary_values_labelled("arbitrary data size")
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn arbitrary_values_labelled<A>(target_label: &'static str) -> ArbitraryGenerator<A>
+where
+    A: for<'a> Arbitrary<'a>,
+{
+    ArbitraryGenerator {
+        target_label,
+        target_pending: AtomicBool::new(true),
+        _arg: PhantomData,
+    }
 }
 
 impl<A> Generator<A> for ArbitraryGenerator<A>
@@ -34,11 +53,26 @@ where
     A: for<'a> Arbitrary<'a>,
 {
     fn do_draw(&self, tc: &TestCase) -> A {
-        let data = tc.draw_silent(gs::binary().min_size(1).max_size(65_536));
-        let mut u = Unstructured::new(&data);
-        match A::arbitrary(&mut u) {
+        let (min_size, max_size) = A::size_hint(0);
+        let mut data = gs::binary().min_size(min_size);
+        if let Some(max_size) = max_size {
+            data = data.max_size(max_size);
+        }
+        let data = tc.draw_silent(data);
+
+        // Hegel maximizes targets, so a negative size asks it to find the
+        // smallest byte buffer which still constructs a valid value.
+        if self.target_pending.swap(false, Ordering::Relaxed) {
+            let size = u32::try_from(data.len()).unwrap_or(u32::MAX);
+            tc.target_labelled(-f64::from(size), self.target_label);
+        }
+        match A::arbitrary_take_rest(Unstructured::new(&data)) {
             Ok(value) => value,
-            Err(_) => tc.reject(),
+            Err(arbitrary::Error::NotEnoughData | arbitrary::Error::IncorrectFormat) => tc.reject(),
+            Err(arbitrary::Error::EmptyChoose) => {
+                panic!("Arbitrary implementation attempted to choose from an empty collection")
+            }
+            Err(error) => panic!("Arbitrary implementation failed: {error}"),
         }
     }
 }
@@ -73,17 +107,23 @@ where
     A: for<'a> Arbitrary<'a>,
     F: FnMut(A) -> Poll<ControlFlow<()>>,
 {
-    drive_poll_fn_with(arbitrary_values(), f)
+    drive_poll_fn_with(arbitrary_values_labelled("driver arbitrary data size"), f)
 }
 
-impl<'a, A, G, F> Driver<'a> for PollFnDriver<F, G, A>
+impl<A, G, F> Driver<'_> for PollFnDriver<F, G, A>
 where
     G: Generator<A>,
     F: FnMut(A) -> Poll<ControlFlow<()>>,
 {
-    fn poll(self: Pin<&mut Self>, tc: &TestCase) -> Poll<ControlFlow<()>> {
+    type Action = A;
+
+    fn actions(&self) -> impl Generator<Self::Action> {
+        &self.generator
+    }
+
+    fn poll(self: Pin<&mut Self>, action: Self::Action) -> Poll<ControlFlow<()>> {
         let this = self.project();
-        (this.f)(tc.draw_silent(&*this.generator))
+        (this.f)(action)
     }
 }
 
@@ -117,20 +157,42 @@ where
     A: for<'a> Arbitrary<'a>,
     F: AsyncFnMut(A) -> ControlFlow<()>,
 {
-    drive_fn_with(arbitrary_values(), f)
+    drive_fn_with(arbitrary_values_labelled("driver arbitrary data size"), f)
 }
 
-impl<'a, A, G, F> Driver<'a> for AsyncFnDriver<F, G, A>
+impl<A, G, F> Driver<'_> for AsyncFnDriver<F, G, A>
 where
     G: Generator<A>,
     F: AsyncFnMut(A) -> ControlFlow<()> + Unpin,
 {
-    fn poll(self: Pin<&mut Self>, tc: &TestCase) -> Poll<ControlFlow<()>> {
+    type Action = A;
+
+    fn actions(&self) -> impl Generator<Self::Action> {
+        &self.generator
+    }
+
+    fn poll(self: Pin<&mut Self>, action: Self::Action) -> Poll<ControlFlow<()>> {
         let this = self.project();
         let cx = &mut Context::from_waker(Waker::noop());
-        let arg = tc.draw_silent(&*this.generator);
-        let mut fut = pin!((this.f)(arg));
+        let mut fut = pin!((this.f)(action));
         fut.as_mut().poll(cx)
+    }
+}
+
+struct SinkActionGenerator<'a, G> {
+    items: &'a G,
+}
+
+impl<A, G> Generator<Option<A>> for SinkActionGenerator<'_, G>
+where
+    G: Generator<A>,
+{
+    fn do_draw(&self, tc: &TestCase) -> Option<A> {
+        if tc.draw_silent(gs::integers::<u8>()) == u8::MAX {
+            None
+        } else {
+            Some(tc.draw_silent(self.items))
+        }
     }
 }
 
@@ -169,15 +231,26 @@ where
     A: for<'a> Arbitrary<'a>,
     S: Sink<A, Error: std::fmt::Debug>,
 {
-    drive_sink_with(sink, arbitrary_values())
+    drive_sink_with(
+        sink,
+        arbitrary_values_labelled("driver arbitrary data size"),
+    )
 }
 
-impl<'a, S, G, A> Driver<'a> for SinkDriver<S, G, A>
+impl<S, G, A> Driver<'_> for SinkDriver<S, G, A>
 where
     G: Generator<A>,
     S: Sink<A, Error: std::fmt::Debug>,
 {
-    fn poll(self: Pin<&mut Self>, tc: &TestCase) -> Poll<ControlFlow<()>> {
+    type Action = Option<A>;
+
+    fn actions(&self) -> impl Generator<Self::Action> {
+        SinkActionGenerator {
+            items: &self.generator,
+        }
+    }
+
+    fn poll(self: Pin<&mut Self>, action: Self::Action) -> Poll<ControlFlow<()>> {
         let mut this = self.project();
         let mut cx = Context::from_waker(Waker::noop());
 
@@ -185,7 +258,7 @@ where
             return Poll::Ready(ControlFlow::Break(()));
         }
 
-        *this.closing = *this.closing || tc.draw_silent(gs::integers::<u8>()) == u8::MAX;
+        *this.closing = *this.closing || action.is_none();
         if *this.closing {
             if let Poll::Ready(res) = this.sink.poll_close(&mut cx) {
                 res.unwrap();
@@ -198,7 +271,9 @@ where
             };
             res.unwrap();
 
-            let item = tc.draw_silent(&*this.generator);
+            let Some(item) = action else {
+                unreachable!();
+            };
             this.sink.as_mut().start_send(item).unwrap();
         }
 
@@ -210,13 +285,35 @@ where
 mod tests {
     use super::*;
 
+    struct RequiresTakeRest;
+
+    impl<'a> Arbitrary<'a> for RequiresTakeRest {
+        fn arbitrary(_u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            panic!("ordinary Arbitrary entry point was used")
+        }
+
+        fn arbitrary_take_rest(_u: Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self)
+        }
+    }
+
     #[test]
     fn arbitrary_driver_adapter_remains_available() {
         hegel::Hegel::new(|tc| {
             let mut driver = pin!(drive_poll_fn(|_: u8| {
                 Poll::Ready(ControlFlow::Continue(()))
             }));
-            assert!(Driver::poll(driver.as_mut(), &tc).is_ready());
+            let action = tc.draw_silent(driver.as_ref().get_ref().actions());
+            assert!(Driver::poll(driver.as_mut(), action).is_ready());
+        })
+        .settings(hegel::Settings::new().test_cases(1).database(None))
+        .run();
+    }
+
+    #[test]
+    fn arbitrary_adapter_uses_take_rest() {
+        hegel::Hegel::new(|tc| {
+            let _: RequiresTakeRest = tc.draw_silent(arbitrary_values());
         })
         .settings(hegel::Settings::new().test_cases(1).database(None))
         .run();

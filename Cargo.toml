@@ -27,3 +27,6 @@ diatomic-waker = "0.2"
 scopeguard = "1"
 futures = "0.3"
 tracing-subscriber = "0.3"
+
+[lints.clippy]
+pedantic = "deny"

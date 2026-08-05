@@ -55,7 +55,7 @@
 //!         }
 //!     });
 //!
-//!     let factory = async move |_: ()| {
+//!     let factory = async move |()| {
 //!         let _ = rx.next().await;
 //!     };
 //!
@@ -73,10 +73,11 @@ mod driver;
 mod runner;
 
 pub use arbitrary;
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Unstructured;
 pub use driver::{
-    ArbitraryGenerator, AsyncFnDriver, PollFnDriver, SinkDriver, arbitrary_values, drive_fn,
-    drive_fn_with, drive_poll_fn, drive_poll_fn_with, drive_sink, drive_sink_with,
+    ArbitraryGenerator, AsyncFnDriver, PollFnDriver, SinkDriver, arbitrary_values,
+    arbitrary_values_labelled, drive_fn, drive_fn_with, drive_poll_fn, drive_poll_fn_with,
+    drive_sink, drive_sink_with,
 };
 pub use hegel::generators;
 pub use hegel::{Backend, HealthCheck, Hegel, Mode, Phase, Settings, Verbosity};
@@ -90,13 +91,20 @@ pub trait TestCase {
     /// factory close over references to this value.
     ///
     /// Use `()` when no shared state is needed, or [`ArbitraryDefault<T>`] when you
-    /// need a `Default`-constructed `T` that doesn't implement [`Arbitrary`].
-    type Args<'a>: Arbitrary<'a>;
+    /// need a `Default`-constructed `T` that doesn't implement
+    /// [`arbitrary::Arbitrary`].
+    type Args;
 
     /// An arbitrary value passed to the factory on each invocation. Use `()` if the
     /// future under test doesn't need external input; use a concrete type (e.g. `u8`)
     /// when the future itself consumes data.
-    type FactoryItem<'a>: Arbitrary<'a>;
+    type FactoryItem;
+
+    /// Generate the shared state for one test iteration.
+    fn args(&self) -> impl generators::Generator<Self::Args>;
+
+    /// Generate a value for each invocation of the future factory.
+    fn factory_items(&self) -> impl generators::Generator<Self::FactoryItem>;
 
     /// Construct a ([`Driver`], factory) pair for one test iteration.
     ///
@@ -107,8 +115,8 @@ pub trait TestCase {
     /// This function should be deterministic -- derive any randomness from `args`.
     fn init<'a>(
         &self,
-        args: &mut Self::Args<'a>,
-    ) -> (impl Driver<'a>, impl AsyncFnMut(Self::FactoryItem<'a>));
+        args: &'a mut Self::Args,
+    ) -> (impl Driver<'a>, impl AsyncFnMut(Self::FactoryItem));
 }
 
 /// The other side of the leaf future under test, responsible for making it
@@ -120,8 +128,14 @@ pub trait TestCase {
 ///
 /// See [`drive_poll_fn_with`], [`drive_fn_with`], and [`drive_sink_with`] for
 /// Hegel-native constructors. The variants without `_with` adapt legacy
-/// [`Arbitrary`] inputs.
+/// [`arbitrary::Arbitrary`] inputs.
 pub trait Driver<'a> {
+    /// A generated command which can be applied to this driver.
+    type Action;
+
+    /// Return the generator for the next driver command.
+    fn actions(&self) -> impl generators::Generator<Self::Action>;
+
     /// Drive the leaf future to make progress.
     ///
     /// **Key invariant:** when this returns `Poll::Ready` after the current
@@ -135,7 +149,7 @@ pub trait Driver<'a> {
     /// - `Poll::Pending` -- no progress
     ///
     /// This function is allowed to block.
-    fn poll(self: Pin<&mut Self>, tc: &hegel::TestCase) -> Poll<ControlFlow<()>>;
+    fn poll(self: Pin<&mut Self>, action: Self::Action) -> Poll<ControlFlow<()>>;
 }
 
 /// Shorthand for implementing [`TestCase`].
@@ -171,11 +185,19 @@ macro_rules! testcase {
     (|$args:ident: &mut $arg_ty:ty| -> $item_ty:ty $body:block) => {{
         struct TestCase;
         impl $crate::TestCase for TestCase {
-            type Args<'a> = $arg_ty;
-            type FactoryItem<'a> = $item_ty;
+            type Args = $arg_ty;
+            type FactoryItem = $item_ty;
+            fn args(&self) -> impl $crate::generators::Generator<Self::Args> {
+                $crate::arbitrary_values_labelled("setup arbitrary data size")
+            }
+            fn factory_items(
+                &self,
+            ) -> impl $crate::generators::Generator<Self::FactoryItem> {
+                $crate::arbitrary_values_labelled("factory arbitrary data size")
+            }
             fn init<'a>(
                 &self,
-                $args: &mut $arg_ty,
+                $args: &'a mut $arg_ty,
             ) -> (impl $crate::Driver<'a>, impl AsyncFnMut($item_ty)) {
                 $body
             }
@@ -201,18 +223,17 @@ macro_rules! testcase {
 /// so a shrunk counterexample can be replayed with [`Hegel::reproduce_failure`].
 /// The default configuration runs 1,000 test cases. Passing custom [`Settings`]
 /// replaces those defaults, including the failure-blob setting.
-pub fn tests<T: TestCase>(mut t: T) -> Hegel<impl FnMut(hegel::TestCase)> {
+pub fn tests<T: TestCase>(t: T) -> Hegel<impl FnMut(hegel::TestCase)> {
     Hegel::new(move |tc| {
-        if runner::test(&mut t, &tc).is_err() {
-            tc.reject();
-        }
+        runner::test(&t, &tc);
     })
     .settings(Settings::new().test_cases(1_000).print_blob(true))
 }
 
-/// An [`Arbitrary`] wrapper that constructs `T` via [`Default`].
+/// An [`arbitrary::Arbitrary`] wrapper that constructs `T` via [`Default`].
 ///
-/// [`TestCase::Args`] must implement [`Arbitrary`], but shared-state types like
+/// The [`testcase!`] compatibility adapter requires [`arbitrary::Arbitrary`],
+/// but shared-state types like
 /// `AtomicBool` or `Mutex<Option<Waker>>` typically don't. Wrap them in
 /// `ArbitraryDefault` to bridge the gap:
 ///
@@ -238,6 +259,7 @@ impl<'a, A: Default> arbitrary::Arbitrary<'a> for ArbitraryDefault<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrary::Arbitrary;
 
     #[test]
     fn arbitrary_default_size_hint() {

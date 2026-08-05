@@ -5,10 +5,9 @@ use core::sync::atomic::AtomicBool;
 use core::task::Context;
 use std::{pin::Pin, sync::atomic::Ordering, task::Poll};
 
-use arbitrary::Unstructured;
 use futures_util::task::waker_ref;
 use hegel::TestCase as HegelTestCase;
-use hegel::generators as gs;
+use hegel::generators::{self as gs, Generator};
 
 use crate::{Driver, TestCase};
 
@@ -29,40 +28,27 @@ impl futures_util::task::ArcWake for TestWaker {
     }
 }
 
-pub(crate) fn test<T: TestCase>(t: &mut T, tc: &HegelTestCase) -> arbitrary::Result<()> {
-    // Keep `arbitrary` as the data-generation compatibility layer for user
-    // supplied Args and FactoryItem values. Scheduling and built-in driver
-    // inputs are separate native Hegel draws, so Hegel can shrink them itself.
-    let data = tc.draw_silent(gs::binary().min_size(1).max_size(65_536));
-    tc.target_labelled(data.len() as f64, "arbitrary data size");
-    let mut u = Unstructured::new(&data);
+pub(crate) fn test<T: TestCase>(t: &T, tc: &HegelTestCase) {
     let completions_needed = tc.draw_silent(gs::integers::<u8>().max_value(7));
-    let actions: Vec<Choice> = tc
-        .draw_silent(gs::vecs(gs::integers::<u8>()).max_size(4_096))
-        .into_iter()
-        .map(Choice::from)
-        .collect();
-    tc.target_labelled(actions.len() as f64, "schedule length");
-    tc.note(&format!("arbitrary data bytes = {}", data.len()));
+    // Like `TestCase::repeat`, leave collection sizing to Hegel. Generating
+    // commands directly also lets Hegel shrink the schedule structure and
+    // each command together.
+    let actions = tc.draw_silent(gs::vecs(gs::integers::<u8>().map(Choice::from)));
+    let schedule_length = u32::try_from(actions.len()).unwrap_or(u32::MAX);
+    tc.target_labelled(f64::from(schedule_length), "schedule length");
     tc.note(&format!("completions needed = {completions_needed}"));
-    tc.note(&format!("schedule = {actions:?}"));
     let mut actions = actions.into_iter();
 
-    run(t, &mut u, tc, completions_needed, || actions.next())
+    run(t, tc, completions_needed, || actions.next());
 }
 
-fn run<T, F>(
-    t: &mut T,
-    u: &mut Unstructured<'_>,
-    tc: &HegelTestCase,
-    completions_needed: u8,
-    mut next_choice: F,
-) -> arbitrary::Result<()>
+fn run<T, F>(t: &T, tc: &HegelTestCase, completions_needed: u8, mut next_choice: F)
 where
     T: TestCase,
     F: FnMut() -> Option<Choice>,
 {
-    let mut args = u.arbitrary()?;
+    let mut args = tc.draw_silent(t.args());
+    let factory_items = t.factory_items();
     let (driver, mut factory) = t.init(&mut args);
     let mut driver = pin!(driver);
     let mut waker = Arc::new(TestWaker {
@@ -70,24 +56,33 @@ where
     });
     let mut completions = 0;
     let mut driver_done = false;
+    let mut step = 0_u32;
+    let mut skipped = 0_u32;
 
-    while completions <= completions_needed && !driver_done {
+    'schedule: while completions <= completions_needed && !driver_done {
         #[cfg(feature = "tracing")]
         let _span =
             tracing::trace_span!("iteration", iteration = completions + 1, completions_needed)
                 .entered();
 
-        let mut future = pin!(factory(u.arbitrary()?));
+        let mut future = pin!(factory(tc.draw_silent(&factory_items)));
         let mut waker_registered = false;
         loop {
             let Some(choice) = next_choice() else {
-                return Ok(());
+                break 'schedule;
             };
+            step += 1;
+            // `repeat` emits a note before running each iteration. Do the same
+            // for schedule commands so a failure is anchored to its cause.
+            tc.note(&format!("// Schedule step #{step}: {choice:?}"));
             match choice {
                 Choice::ChangeWaker => {
                     if !waker.woken.swap(false, Ordering::SeqCst) {
+                        skipped += 1;
+                        tc.note("  skipped (current waker has not been woken)");
                         continue;
                     }
+                    tc.note("  applied");
                     trace!("change_waker");
                     waker = Arc::new(TestWaker {
                         woken: AtomicBool::new(true),
@@ -97,11 +92,18 @@ where
                 Choice::Poll { spurious } => {
                     let was_woken = waker.woken.swap(false, Ordering::SeqCst);
                     if !(was_woken || spurious) {
+                        skipped += 1;
+                        tc.note("  skipped (future was not woken)");
                         continue;
                     }
                     let poll = poll_fut(&mut waker, future.as_mut());
+                    tc.note(if poll.is_ready() {
+                        "  returned Ready"
+                    } else {
+                        "  returned Pending"
+                    });
                     trace!(
-                        spurious = spurious & !was_woken,
+                        spurious = spurious && !was_woken,
                         ready = poll.is_ready(),
                         "poll"
                     );
@@ -113,7 +115,13 @@ where
                     waker_registered = true;
                 }
                 Choice::Drive => {
-                    let poll = driver.as_mut().poll(tc);
+                    let action = tc.draw_silent(driver.as_ref().get_ref().actions());
+                    let poll = driver.as_mut().poll(action);
+                    tc.note(match poll {
+                        Poll::Pending => "  returned Pending",
+                        Poll::Ready(cf) if cf.is_break() => "  returned Ready(Break)",
+                        Poll::Ready(_) => "  returned Ready(Continue)",
+                    });
                     trace!(
                         ready = poll.is_ready(),
                         done = matches!(poll, Poll::Ready(cf) if cf.is_break()),
@@ -130,6 +138,7 @@ where
                     }
                 }
                 Choice::Cancel => {
+                    tc.note("  applied");
                     trace!("cancel");
                     break;
                 }
@@ -137,7 +146,8 @@ where
         }
     }
 
-    Ok(())
+    let efficiency = f64::from(step - skipped) / f64::from(step.max(1));
+    tc.target_labelled(efficiency, "schedule efficiency");
 }
 
 fn poll_fut(waker: &mut Arc<TestWaker>, f: Pin<&mut impl Future>) -> Poll<()> {
@@ -149,9 +159,7 @@ fn poll_fut(waker: &mut Arc<TestWaker>, f: Pin<&mut impl Future>) -> Poll<()> {
 
     if let Some(waker) = Arc::get_mut(waker) {
         let woken = *waker.woken.get_mut();
-        if !woken {
-            panic!("Waker passed to future was lost without being woken");
-        }
+        assert!(woken, "Waker passed to future was lost without being woken");
     }
 
     Poll::Pending
@@ -186,17 +194,15 @@ mod tests {
 
     #[test]
     fn exhausted_schedule_terminates_instead_of_livelock() {
-        let mut t = testcase!(|| {
+        let t = testcase!(|| {
             let driver = drive_poll_fn_with(gs::unit(), |()| Poll::Pending);
-            let factory = async move |_: ()| {};
+            let factory = async move |()| {};
             (driver, factory)
         });
 
         // A finite Hegel-generated schedule may end while a future is pending.
         hegel::Hegel::new(move |tc| {
-            let mut u = Unstructured::new(&[]);
-            let result = run(&mut t, &mut u, &tc, 0, || None);
-            assert!(result.is_ok());
+            run(&t, &tc, 0, || None);
         })
         .settings(hegel::Settings::new().test_cases(1).database(None))
         .run();
@@ -222,19 +228,27 @@ mod tests {
         }
 
         impl crate::TestCase for MyTestCase {
-            type Args<'a> = ();
-            type FactoryItem<'a> = ();
+            type Args = ();
+            type FactoryItem = ();
+
+            fn args(&self) -> impl Generator<Self::Args> {
+                gs::unit()
+            }
+
+            fn factory_items(&self) -> impl Generator<Self::FactoryItem> {
+                gs::unit()
+            }
 
             fn init<'a>(
                 &self,
-                _args: &mut Self::Args<'a>,
+                _args: &'a mut Self::Args,
             ) -> (
                 impl crate::Driver<'a>,
-                impl core::ops::AsyncFnMut(Self::FactoryItem<'a>),
+                impl core::ops::AsyncFnMut(Self::FactoryItem),
             ) {
                 let driver = crate::drive_poll_fn_with(gs::unit(), |()| Poll::Pending);
                 let counter = self.counter.clone();
-                let factory = move |_: ()| {
+                let factory = move |()| {
                     counter.fetch_add(1, Ordering::SeqCst);
                     core::future::ready(())
                 };
@@ -243,16 +257,12 @@ mod tests {
         }
 
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut t = MyTestCase {
+        let t = MyTestCase {
             counter: counter.clone(),
         };
 
         hegel::Hegel::new(move |tc| {
-            let mut u = Unstructured::new(&[]);
-            run(&mut t, &mut u, &tc, 2, || {
-                Some(Choice::Poll { spurious: false })
-            })
-            .unwrap();
+            run(&t, &tc, 2, || Some(Choice::Poll { spurious: false }));
         })
         .settings(hegel::Settings::new().test_cases(1).database(None))
         .run();
